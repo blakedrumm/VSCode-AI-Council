@@ -41,6 +41,10 @@ Unblock-File .\Install-VSCodeCopilotCouncil-v5.ps1
 
 The installer prompts for the models to use, writes the agent files, and tells you to reload VS Code. Then pick **Multi-Model Engineering Council** from the agents dropdown in Copilot Chat.
 
+<p align="center">
+  <img src="docs/agent-picker.png" alt="Selecting Multi-Model Engineering Council from the VS Code agents dropdown" width="760">
+</p>
+
 ## What gets installed
 
 | Agent | Visible | Tools | Role |
@@ -68,6 +72,12 @@ The coordinator classifies each request once and picks the cheapest strategy tha
 Tiers 3 and 4 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, and from spending an expert call on something a single tool call can verify.
 
 Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won.
+
+<p align="center">
+  <img src="docs/parallel-experts.png" alt="Five expert agents running at once, each on a different model with a different review lens" width="380">
+</p>
+
+<p align="center"><em>A Tier 4 fan out in progress. Five experts working simultaneously, each on a different model, each holding a different lens.</em></p>
 
 ### The five lenses
 

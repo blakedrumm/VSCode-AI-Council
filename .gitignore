@@ -10,7 +10,3 @@ desktop.ini
 # The shareable plain-text copy of the installer stays local. The repository is the canonical
 # source now, and a second copy would only drift out of sync.
 Install-VSCodeCopilotCouncil-v5.txt
-
-# Unlabelled working screenshots. Delete these two lines to publish them.
-image.png
-image2.png
