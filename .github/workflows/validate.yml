@@ -1,0 +1,93 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Parse the script
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          $tokens = $null
+          $path = (Resolve-Path './Install-VSCodeCopilotCouncil-v5.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors) | Out-Null
+
+          if ($parseErrors)
+          {
+              foreach ($parseError in $parseErrors)
+              {
+                  Write-Host "::error file=Install-VSCodeCopilotCouncil-v5.ps1,line=$($parseError.Extent.StartLineNumber)::$($parseError.Message)"
+              }
+
+              exit 1
+          }
+
+          Write-Host 'Parsed with no syntax errors.'
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+          $findings = Invoke-ScriptAnalyzer -Path './Install-VSCodeCopilotCouncil-v5.ps1' -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
+
+          if ($findings)
+          {
+              foreach ($finding in $findings)
+              {
+                  Write-Host "::error file=Install-VSCodeCopilotCouncil-v5.ps1,line=$($finding.Line)::$($finding.RuleName) - $($finding.Message)"
+              }
+
+              exit 1
+          }
+
+          Write-Host 'PSScriptAnalyzer reported no errors or warnings.'
+
+      - name: Confirm the version constant matches the help header
+        shell: pwsh
+        run: |
+          # The update check reads the constant, so a stale .NOTES entry would mislead anyone
+          # reading the file rather than running it.
+          $text = Get-Content './Install-VSCodeCopilotCouncil-v5.ps1' -Raw
+          $constant = [regex]::Match($text, '\$ScriptVersion\s*=\s*''([0-9]+(?:\.[0-9]+){1,3})''').Groups[1].Value
+          $notes = [regex]::Match($text, 'Version:\s*\r?\n\s*([0-9]+(?:\.[0-9]+){1,3})').Groups[1].Value
+
+          if ([string]::IsNullOrWhiteSpace($constant))
+          {
+              Write-Host '::error::Could not find the $ScriptVersion constant. The update check depends on it.'
+              exit 1
+          }
+
+          if ($constant -ne $notes)
+          {
+              Write-Host "::error::Version mismatch. The constant says $constant and the .NOTES block says $notes."
+              exit 1
+          }
+
+          Write-Host "Version $constant is consistent."
+
+      - name: Confirm the .txt copy matches the script
+        shell: pwsh
+        run: |
+          $script = (Get-FileHash './Install-VSCodeCopilotCouncil-v5.ps1' -Algorithm SHA256).Hash
+          $copy = (Get-FileHash './Install-VSCodeCopilotCouncil-v5.txt' -Algorithm SHA256).Hash
+
+          if ($script -ne $copy)
+          {
+              Write-Host '::error file=Install-VSCodeCopilotCouncil-v5.txt::The .txt copy is out of sync with the .ps1. Copy the script over it.'
+              exit 1
+          }
+
+          Write-Host 'The .txt copy matches the script.'

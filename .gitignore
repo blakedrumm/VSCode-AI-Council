@@ -1,0 +1,12 @@
+# Windows and OneDrive noise
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Temp files the installer's atomic writer can leave behind if a run is killed
+*.tmp
+*.old
+
+# Unlabelled working screenshots. Delete these two lines to publish them.
+image.png
+image2.png
