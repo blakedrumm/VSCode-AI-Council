@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="ai-council.png" alt="VS Code AI Council" width="900">
+  <img src="docs/ai-council.png" alt="VS Code AI Council" width="900">
 </p>
 
 <h1 align="center">VS Code AI Council</h1>
@@ -24,7 +24,7 @@ One model reviewing its own work will confidently repeat its own blind spots. Th
 It installs a single agent you select in Copilot Chat. That coordinator decides for itself how much horsepower a question deserves, from answering directly at zero cost up to fanning out to five experts in parallel.
 
 <p align="center">
-  <img src="content.png" alt="Coordinator agent delegating to specialist agents that cross-check each other" width="900">
+  <img src="docs/content.png" alt="Coordinator agent delegating to specialist agents that cross-check each other" width="900">
 </p>
 
 ## Install

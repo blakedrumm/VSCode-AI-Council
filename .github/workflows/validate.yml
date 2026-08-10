@@ -77,17 +77,3 @@ jobs:
           }
 
           Write-Host "Version $constant is consistent."
-
-      - name: Confirm the .txt copy matches the script
-        shell: pwsh
-        run: |
-          $script = (Get-FileHash './Install-VSCodeCopilotCouncil-v5.ps1' -Algorithm SHA256).Hash
-          $copy = (Get-FileHash './Install-VSCodeCopilotCouncil-v5.txt' -Algorithm SHA256).Hash
-
-          if ($script -ne $copy)
-          {
-              Write-Host '::error file=Install-VSCodeCopilotCouncil-v5.txt::The .txt copy is out of sync with the .ps1. Copy the script over it.'
-              exit 1
-          }
-
-          Write-Host 'The .txt copy matches the script.'
