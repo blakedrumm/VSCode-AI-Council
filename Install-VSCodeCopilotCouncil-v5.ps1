@@ -261,7 +261,34 @@ param
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# =============================================================================================
+# HOW THIS SCRIPT IS ORGANIZED
+#
+#   1. Script configuration    Constants, the lens catalog, and the update-check target.
+#   2. Console output          Timestamped logging and the step progress counter.
+#   3. File helpers            Atomic UTF-8 writes and timestamped backups.
+#   4. Small helpers           Name validation, slug generation, safe property access.
+#   5. Update check            Reads the published version from GitHub. Never runs remote code.
+#   6. Model discovery         Reads the live model list from the VS Code SQLite state database.
+#   7. Previous installation   Recovers the last-used models from the installed agent files.
+#   8. Recommendation          Picks a vendor-diverse roster from whatever the catalog offers.
+#   9. Interactive prompts     The model picker and the coordinator picker.
+#  10. VS Code settings        A comment-preserving edit of the user's settings.json.
+#  11. Agent content           Builds the markdown body of every agent file.
+#  12. Install and validate    Writes the agent files, then re-reads them to prove they are sane.
+#  13. Environment detection   Finds VS Code and the Copilot extensions.
+#  14. Installation            The top-level flow. This is where execution actually begins.
+#
+# Sections 1 through 13 only define constants and functions. Nothing happens until section 14.
+# =============================================================================================
+
+#region 1. Script configuration
+
+# The five lenses below are the hard ceiling on model count, since a sixth model would have to
+# reuse a lens and two experts would then duplicate each other's work.
 $MaxModelCount = 5
+
+# The coordinator is the only agent the user ever selects. Everything else is a hidden worker.
 $CoordinatorAgentName = 'Multi-Model Engineering Council'
 $CoordinatorFileName = 'multi-model-engineering-council.agent.md'
 
@@ -272,7 +299,8 @@ $ScriptVersion = '5.5.0'
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
 
-# Only used when the live model list cannot be read from the VS Code cache.
+# Only used when the live model list cannot be read from the VS Code cache. These names will go
+# stale as models are retired, which is exactly why the cache is preferred over this list.
 $DefaultModelCatalog = @(
     'Claude Haiku 4.5',
     'Claude Opus 5',
@@ -284,12 +312,15 @@ $DefaultModelCatalog = @(
     'Grok 4.5'
 )
 
+# The last-resort roster for a fully unattended run with no models given and nothing installed.
 $DefaultModels = @('GPT-5.6 Sol', 'Claude Opus 5')
 
 # Shown next to the recommended set so a stale rule is visible rather than silently trusted.
 $RecommendationDate = 'August 10, 2026'
 
 # Position in this list determines each expert's primary lens, so parallel workers never overlap.
+# The Focus entries are pasted verbatim into the generated expert agent, which is what actually
+# steers that model's attention. Reordering this list silently reassigns every lens.
 $LensCatalog = @(
     [PSCustomObject]@{
         Title = 'Implementation and correctness'
@@ -348,6 +379,10 @@ $LensCatalog = @(
     }
 )
 
+#endregion
+
+#region 2. Console output and progress
+
 # Every status line in the script funnels through here so the console keeps one consistent, timestamped style.
 function Write-Console
 {
@@ -387,6 +422,8 @@ function Write-Console
     }
 }
 
+# Renders a duration at a sensible precision. Sub-second steps read better in milliseconds than
+# as "0.04 s", and a long run reads better as mm:ss than as a four-digit second count.
 function Format-Elapsed
 {
     param
@@ -414,6 +451,8 @@ function Format-Elapsed
 # even when branches such as -SkipVSCodeSetting remove steps.
 $script:InstallProgressState = $null
 
+# Records the planned step list and decides whether a graphical progress bar is appropriate.
+# Call this once, before the first Start-InstallStep.
 function Initialize-InstallProgress
 {
     param
@@ -449,6 +488,8 @@ function Initialize-InstallProgress
     Write-Verbose ('Planned steps: {0}' -f ($StepNames -join ' | '))
 }
 
+# Announces the start of a step, bumps the counter, and starts the per-step timer.
+# Every Start-InstallStep must be matched by a Complete-InstallStep or the counter will drift.
 function Start-InstallStep
 {
     param
@@ -475,6 +516,7 @@ function Start-InstallStep
     }
 }
 
+# Stops the per-step timer and prints how long the step took.
 function Complete-InstallStep
 {
     if ($null -eq $script:InstallProgressState -or $null -eq $script:InstallProgressState.Timer)
@@ -488,6 +530,7 @@ function Complete-InstallStep
     $script:InstallProgressState.Timer = $null
 }
 
+# Clears the progress bar at the end of the run so it does not linger in the console.
 function Complete-InstallProgress
 {
     if ($null -eq $script:InstallProgressState)
@@ -501,6 +544,12 @@ function Complete-InstallProgress
     }
 }
 
+#endregion
+
+#region 3. File writing and backup
+
+# Collapses CRLF, lone CR, and LF down to one style, then re-emits the platform's line ending.
+# Without this, content assembled from here-strings and joined arrays ends up with mixed endings.
 function ConvertTo-NormalizedText
 {
     param
@@ -517,6 +566,8 @@ function ConvertTo-NormalizedText
     return ($Normalized -replace "`n", [Environment]::NewLine)
 }
 
+# Writes UTF-8 without a byte order mark, which is what VS Code expects for agent files.
+# A BOM would end up inside the YAML front matter and break the first key.
 function Write-Utf8File
 {
     param
@@ -588,6 +639,8 @@ function Write-Utf8File
     }
 }
 
+# Copies a file into the run's backup folder before it is overwritten or deleted.
+# The parent folder name is prefixed onto the copy so files with the same name never collide.
 function Backup-ExistingFile
 {
     param
@@ -628,6 +681,12 @@ function Backup-ExistingFile
     Write-Console "Backup copy: $BackupPath"
 }
 
+#endregion
+
+#region 4. Small helpers
+
+# Rejects a model name that would corrupt the generated agent file. This runs on anything the
+# user types, anything read back from a previous install, and anything read from the model cache.
 function Test-ModelName
 {
     param
@@ -652,6 +711,7 @@ function Test-ModelName
     return ($Name -match '^[A-Za-z0-9]')
 }
 
+# Turns a model name into a safe file name fragment, for example "GPT-5.6 Sol" to "gpt-5-6-sol".
 function ConvertTo-AgentSlug
 {
     param
@@ -672,6 +732,8 @@ function ConvertTo-AgentSlug
     return $Slug
 }
 
+# Reads a property that may not exist. Set-StrictMode turns a plain $Object.Missing into a
+# terminating error, so every access to parsed JSON has to go through this.
 function Get-PropertyValue
 {
     param
@@ -701,6 +763,19 @@ function Get-PropertyValue
     return $Property.Value
 }
 
+#endregion
+
+#region 5. Update check
+
+# Returns the version string published for this script, or $null if it cannot be determined.
+#
+# Two sources are tried in order:
+#   1. The GitHub releases API, which is small and fast but requires a tagged release.
+#   2. The raw script file on the default branch, which works for a repository that only
+#      receives plain commits.
+#
+# Every failure path returns $null rather than throwing, because a blocked network, a proxy, or
+# a deleted repository must never stop someone from installing.
 function Get-PublishedScriptVersion
 {
     param
@@ -782,6 +857,15 @@ function Get-PublishedScriptVersion
     return $null
 }
 
+#endregion
+
+#region 6. VS Code model catalog discovery
+
+# Compiles a tiny P/Invoke wrapper around the SQLite library that ships with Windows.
+# Returns $true when the type is available, $false when the platform cannot provide it.
+#
+# This exists because the VS Code model list lives in a SQLite database and there is no
+# supported command-line way to read it.
 function Initialize-SqliteInterop
 {
     if ('VSCodeCouncil.Sqlite' -as [type])
@@ -839,6 +923,11 @@ public static extern int Close(IntPtr db);
     }
 }
 
+# Reads the cached model list out of one VS Code state database and returns a Name plus Category
+# record for every model that is user-selectable and supports agent mode.
+#
+# Category is the size class VS Code publishes: powerful, versatile, or lightweight. The
+# recommendation logic depends on it, because a model name alone does not reveal its size.
 function Get-CachedModelRecord
 {
     param
@@ -977,6 +1066,9 @@ function Get-CachedModelRecord
     return @()
 }
 
+# Tries the stable VS Code state database first, then Insiders, and returns the first one that
+# yields any models. Returns an empty array when neither is readable, which sends the caller to
+# the built-in fallback catalog.
 function Get-VSCodeModelCatalog
 {
     if ([string]::IsNullOrWhiteSpace($env:APPDATA) -or -not (Initialize-SqliteInterop))
@@ -1007,6 +1099,15 @@ function Get-VSCodeModelCatalog
     return @()
 }
 
+#endregion
+
+#region 7. Previous installation detection
+
+# Recovers the models and coordinator model from an installation already on disk, so a re-run can
+# offer to reuse them. Returns $null when nothing usable is found.
+#
+# The installed coordinator agent is the source of truth rather than a separate state file, which
+# means the offer always reflects what is really installed and there is no extra file to go stale.
 function Get-PreviousCouncilConfiguration
 {
     param
@@ -1078,6 +1179,16 @@ function Get-PreviousCouncilConfiguration
     }
 }
 
+#endregion
+
+#region 8. Model recommendation heuristic
+#
+# The goal of this section is one model per vendor. A peer review is only independent across
+# training lineages, so two models from the same family would confirm each other's blind spots
+# rather than challenge them. Everything below serves that single rule.
+
+# Maps a model name to the vendor that trained it. The returned string is only ever used as a
+# grouping key, so its exact value does not matter as long as it is stable.
 function Get-ModelFamily
 {
     param
@@ -1109,6 +1220,13 @@ function Get-ModelFamily
     return "Other:$Name"
 }
 
+# Scores how suitable a model is for an expert seat:
+#   3  full size, prefer these
+#   2  mid size, acceptable
+#   0  reduced size, never recommend
+#
+# Prefers the category VS Code publishes over anything inferred from the name, because a name
+# like "GPT-5.6 Luna" carries no size hint at all and guessing gets it wrong.
 function Get-ModelTierWeight
 {
     param
@@ -1155,6 +1273,9 @@ function Get-ModelTierWeight
     return 1
 }
 
+# Pulls the first number out of a model name, so "Claude Opus 4.8" becomes 4.8 and "Claude Opus 5"
+# becomes 5.0. Only ever compared against another model from the same vendor, since numbering
+# schemes are unrelated across vendors.
 function Get-ModelVersion
 {
     param
@@ -1181,6 +1302,15 @@ function Get-ModelVersion
     return [version]::new([int]$Match.Groups[1].Value, $Minor)
 }
 
+# Picks up to MaximumCount models from the supplied catalog, in the order they should be assigned
+# to lenses. Returns an empty array when the catalog contains nothing worth recommending.
+#
+# The algorithm, in order:
+#   1. Discard the Auto router and every reduced-size model.
+#   2. Rank what is left by tier, then vendor, then version within that vendor.
+#   3. Take the best model from each vendor first, which is the whole point of the exercise.
+#   4. Only once vendors run out, fill the remaining slots, preferring a coding specialist over
+#      another general model from a vendor that is already represented.
 function Get-RecommendedModelSet
 {
     param
@@ -1297,6 +1427,15 @@ function Get-RecommendedModelSet
     return @($Ranked | Where-Object { $Chosen.Contains($_.Name) } | ForEach-Object { $_.Name })
 }
 
+#endregion
+
+#region 9. Interactive prompts
+
+# Shows the model picker and loops until the user confirms a usable selection.
+#
+# Accepts menu numbers, typed model names, C for a custom name, or R for the recommended set.
+# The R shortcut rewrites the response into the normal comma-separated form rather than taking a
+# separate code path, so the recommended names get exactly the same validation as typed ones.
 function Select-ModelList
 {
     param
@@ -1477,6 +1616,8 @@ function Select-ModelList
     }
 }
 
+# Asks which of the already-chosen models should run the coordinator. Returns immediately when
+# only one model is configured, since there is nothing to choose.
 function Select-CoordinatorModel
 {
     param
@@ -1523,6 +1664,12 @@ function Select-CoordinatorModel
     }
 }
 
+#endregion
+
+#region 10. VS Code settings file
+
+# Resolves which settings.json to edit, preferring an explicit path, then stable VS Code, then
+# Insiders. Falls back to the stable path so a missing file gets created in the expected place.
 function Get-VSCodeUserSettingsPath
 {
     param
@@ -1559,6 +1706,10 @@ function Get-VSCodeUserSettingsPath
     return $StablePath
 }
 
+# Replaces every comment with spaces while leaving string literals and the total length alone.
+#
+# Searching the masked copy means a setting that appears inside a comment is never mistaken for a
+# real one, and because the length is unchanged, any index found here is valid in the original.
 function ConvertTo-CommentMaskedJson
 {
     param
@@ -1585,6 +1736,8 @@ function ConvertTo-CommentMaskedJson
         })
 }
 
+# Parses JSON with comments, the dialect VS Code settings files actually use. Comments and
+# trailing commas are both legal there and both rejected by ConvertFrom-Json.
 function ConvertFrom-JsoncText
 {
     param
@@ -1609,6 +1762,15 @@ function ConvertFrom-JsoncText
     return ($StrictJson | ConvertFrom-Json)
 }
 
+# Turns on nested subagents in the user's settings.json, which the council needs so an expert can
+# consult a reviewer.
+#
+# This edits a file the script does not own, so it is deliberately conservative:
+#   - the existing value is patched in place rather than the object being rebuilt, which would
+#     throw away the user's comments and formatting
+#   - the result is parsed and checked before it is written, and again after
+#   - a pre-existing non-boolean value is a hard error rather than a silent second key
+#   - the file is backed up first
 function Set-VSCodeNestedSubagentsSetting
 {
     param
@@ -1733,6 +1895,21 @@ function Set-VSCodeNestedSubagentsSetting
     Write-Console "VS Code settings file: $SettingsPath"
 }
 
+#endregion
+
+#region 11. Agent file content
+#
+# The three New-*AgentContent functions below return the complete text of an agent file: YAML
+# front matter followed by the instructions that model will receive as its system prompt.
+#
+# They use expandable here-strings, so any literal $ or backtick in the prompt text has to be
+# escaped. Forgetting that is the most likely way to break this section.
+
+# Builds the YAML header every agent file starts with.
+#
+# user-invocable false hides an agent from the picker, and disable-model-invocation true stops
+# unrelated agents from recruiting it. Together they keep the workers hidden but reachable by the
+# coordinator, which lists them explicitly in its own agents property.
 function New-AgentFrontMatter
 {
     param
@@ -1782,6 +1959,8 @@ function New-AgentFrontMatter
     return ($Lines -join "`n")
 }
 
+# Builds a leaf peer reviewer. Deliberately has no agent tool and no agents list, which is what
+# physically caps nesting at two levels instead of relying on the model to restrain itself.
 function New-ReviewerAgentContent
 {
     param
@@ -1861,6 +2040,8 @@ Write every line so it can be shown to the user unedited. Summarize, do not past
 "@
 }
 
+# Builds one expert, bound to a single review lens and to a list of reviewers that never includes
+# its own. The lens text is what stops five parallel experts from returning the same answer.
 function New-ExpertAgentContent
 {
     param
@@ -2002,6 +2183,11 @@ Do not edit repository files unless the brief explicitly assigns you a file and 
 "@
 }
 
+# Builds the coordinator, the only agent the user selects directly.
+#
+# Most of the body is spent talking the model out of over-delegating. Left alone, a model with
+# five available experts will use all five on a question that needed none, so the tier rules,
+# the escalation limits, and the explicit cost of each tier all exist to push it downward.
 function New-CoordinatorAgentContent
 {
     param
@@ -2261,6 +2447,11 @@ At Tier 0 you used no experts, so skip the deliberation section entirely and kee
 "@
 }
 
+#endregion
+
+#region 12. Agent file install and validation
+
+# Backs up any existing file, writes the new one, and confirms it landed.
 function Install-AgentFile
 {
     param
@@ -2295,6 +2486,12 @@ function Install-AgentFile
     Write-Console "Installed agent: $DestinationPath"
 }
 
+# Re-reads an agent file from disk and throws if anything about it is wrong.
+#
+# This runs after every write because the failure mode it guards against is silent: a template
+# variable that did not expand still produces a valid file, VS Code still loads it, and the agent
+# just behaves badly with no error anywhere. Checking the file we actually wrote is the only way
+# to catch that.
 function Test-AgentFile
 {
     param
@@ -2415,6 +2612,10 @@ function Test-AgentFile
         }
     }
 }
+
+#endregion
+
+#region 13. Environment detection
 
 # Reads VS Code state from disk first. The equivalent CLI calls cost roughly 700 ms because each
 # one starts a new Electron process, and the result is only used for informational output.
@@ -2603,8 +2804,16 @@ function Get-VSCodeStatus
     return [PSCustomObject]$Result
 }
 
+#endregion
+
+#region 14. Installation
+#
+# Execution starts here. Everything above this point only defined functions and constants.
+
 $InstallTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
+# UserInteractive is checked as well as -NonInteractive, because a scheduled task or a build agent
+# has no console to prompt on and Read-Host would hang there forever.
 $AllowPrompts = (-not $NonInteractive) -and [Environment]::UserInteractive
 $ModelsWereSupplied = ($null -ne $Models) -and (@($Models).Count -gt 0)
 $CatalogWasSupplied = ($null -ne $ModelCatalog) -and (@($ModelCatalog).Count -gt 0)
@@ -2641,6 +2850,8 @@ Initialize-InstallProgress -StepNames $InstallSteps.ToArray()
 
 Write-Console 'Starting adaptive multi-model Copilot council installation.'
 
+# Step 1. Compare this copy against the published one. Purely informational, and every failure
+# path here is swallowed so a blocked network cannot stop an install.
 $UpdateAvailableVersion = $null
 
 if (-not $SkipUpdateCheck)
@@ -2676,6 +2887,9 @@ if (-not $SkipUpdateCheck)
 
 Start-InstallStep -Name 'Resolve install scope'
 
+# Decides where the agent files go. User scope makes the council available in every workspace,
+# workspace scope confines it to one repository. This has to happen before model selection,
+# because the previous-installation check reads from whichever directory is chosen here.
 if ($Scope -eq 'Workspace')
 {
     if ([string]::IsNullOrWhiteSpace($WorkspacePath))
@@ -2698,6 +2912,9 @@ else
 
 Complete-InstallStep
 
+# Build the list of models to offer in the picker, and a name-to-size-category lookup beside it.
+# $Discovered records whether the list is real or a guess, which decides whether a model missing
+# from it is worth warning about.
 $Discovered = $false
 $ModelCategoryMap = @{}
 
@@ -2740,6 +2957,11 @@ else
 
 Start-InstallStep -Name 'Select models'
 
+# Model selection has four possible sources, in descending priority:
+#   1. -Models, which wins outright and skips every prompt
+#   2. an existing installation the user agrees to reuse
+#   3. the interactive picker
+#   4. the built-in defaults, only when unattended with nothing else to go on
 $LensTitles = @($LensCatalog | ForEach-Object { $_.Title })
 $RecommendedModels = @(Get-RecommendedModelSet -Catalog $Catalog -MaximumCount $MaxModelCount -CategoryMap $ModelCategoryMap)
 $PreviousConfiguration = $null
@@ -2832,6 +3054,8 @@ foreach ($Model in $SelectedModels)
     }
 }
 
+# The coordinator model is independent of the expert roster. Auto is a reasonable choice here even
+# though it is a poor choice for an expert, because the coordinator only orchestrates.
 if (-not [string]::IsNullOrWhiteSpace($CoordinatorModel))
 {
     $ResolvedCoordinatorModel = $CoordinatorModel.Trim()
@@ -2897,6 +3121,9 @@ else
 
 $BackupDirectory = Join-Path -Path $HOME -ChildPath ".copilot\agent-backups\v5_$(Get-Date -Format 'yyyyMMdd_HHmmssfff')"
 
+# Timestamped per run, so repeated installs never overwrite each other's backups. The folder is
+# only created if something actually needs backing up.
+
 Complete-InstallStep
 
 Start-InstallStep -Name 'Detect VS Code and Copilot'
@@ -2945,6 +3172,9 @@ else
 
 Start-InstallStep -Name 'Write agent files'
 
+# Build the roster. Each model gets one expert and one reviewer, and the expert's lens comes from
+# its position in the list. With a single model there is no other family to review it, so the
+# cross-model guarantee cannot hold and the council degrades to a blind-spot check.
 $CrossModelReview = $SelectedModels.Count -gt 1
 $UsedSlugs = New-Object System.Collections.Generic.HashSet[string]
 $ExpertMap = New-Object System.Collections.Generic.List[object]
@@ -2956,6 +3186,8 @@ for ($Index = 0; $Index -lt $SelectedModels.Count; $Index++)
     $CandidateSlug = $Slug
     $Suffix = 2
 
+    # Two different model names can slug identically, and a collision would make the second model's
+    # files overwrite the first model's.
     while (-not $UsedSlugs.Add($CandidateSlug))
     {
         $CandidateSlug = "$Slug-$Suffix"
@@ -2977,6 +3209,8 @@ for ($Index = 0; $Index -lt $SelectedModels.Count; $Index++)
         })
 }
 
+# Wire up peer review. An expert is given every reviewer except the one running its own model,
+# which is the rule that makes a second opinion independent rather than an echo.
 foreach ($Expert in $ExpertMap)
 {
     if ($CrossModelReview)
@@ -3002,6 +3236,8 @@ foreach ($Expert in $ExpertMap)
     }
 }
 
+# Generate and write every agent file. Reviewers are written before their expert so the file the
+# expert references already exists on disk.
 foreach ($Expert in $ExpertMap)
 {
     $ReviewerContent = New-ReviewerAgentContent -AgentName $Expert.ReviewerName -ModelName $Expert.ModelName
@@ -3050,6 +3286,9 @@ Complete-InstallStep
 
 Start-InstallStep -Name 'Validate agent files'
 
+# Read back everything just written and prove it is structurally sound. A broken agent file loads
+# without complaint in VS Code and simply misbehaves, so this is the only place the problem
+# becomes visible.
 foreach ($Expert in $ExpertMap)
 {
     Test-AgentFile `
@@ -3080,6 +3319,8 @@ Write-Console 'All agent files passed post-install validation.'
 Complete-InstallStep
 Complete-InstallProgress
 
+# Everything below is the closing summary. Write-Output rather than Write-Console, because this is
+# a report the user may want to redirect or capture, not progress narration.
 Write-Output ''
 Write-Console ('Installation completed successfully in {0}.' -f (Format-Elapsed -Elapsed $InstallTimer.Elapsed)) -Level 'Success'
 Write-Output ''
@@ -3175,3 +3416,5 @@ if ($OpenInVSCode)
         Write-Console 'The VS Code CLI is not available in PATH, so files were not opened automatically.'
     }
 }
+
+#endregion
