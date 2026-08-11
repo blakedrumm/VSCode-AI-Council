@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.1
+
+### Changed
+
+- **Dot-sourced cache discovery now has a versioned native wrapper.** A long-lived PowerShell
+  session can retain an `Add-Type` definition after the script that created it changes. The model
+  cache reader now uses the versioned `VSCodeCouncil.SqliteCacheV1` type, so an older same-namespace
+  wrapper cannot be mistaken for the current native contract.
+- **Transient model-cache snapshots are retried once.** If the first copied SQLite snapshot is empty
+  or incoherent while VS Code is writing it, the installer takes one fresh snapshot before falling
+  back to the built-in catalog.
+- The regression suite now has 23 tests, including cross-edition model-array normalization,
+  stale-wrapper isolation, and one-shot snapshot recovery on both PowerShell 7 and Windows
+  PowerShell 5.1.
+- Manual release runs no longer request SFTP upload by default. It remains available as an explicit
+  workflow option when the required repository secrets are configured.
+
+### Fixed
+
+- **Windows PowerShell 5.1 model discovery always fell back to the built-in catalog.** In 5.1,
+  calling `ConvertFrom-Json` directly inside `@()` preserves a top-level JSON array as one nested
+  `System.Object[]`. The cache filter therefore saw no `identifier` property and discarded every
+  model. The parser now assigns the JSON result first and normalizes it in a second step, yielding
+  the same record sequence on PowerShell 5.1 and PowerShell 7.
+
 ## 5.7.0
 
 ### Added

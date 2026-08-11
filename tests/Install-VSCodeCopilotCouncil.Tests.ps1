@@ -24,6 +24,10 @@ BeforeAll {
         'Test-ModelName',
         'ConvertTo-AgentSlug',
         'Get-PropertyValue',
+        'Initialize-SqliteInterop',
+        'ConvertFrom-ModelCacheJson',
+        'Get-CachedModelRecord',
+        'Get-VSCodeModelCatalog',
         'Get-ModelFamily',
         'Get-ModelTierWeight',
         'Get-ModelVersion',
@@ -113,6 +117,67 @@ Describe 'Model input and recommendation' {
                 -RecommendationDate 'test')
 
         $Selected | Should -Be @('Custom Model')
+    }
+}
+
+Describe 'VS Code model-cache resilience' {
+    It 'flattens a top-level model array on every PowerShell edition' {
+        $Records = @(ConvertFrom-ModelCacheJson -Json '[{"identifier":"one"},{"identifier":"two"}]')
+
+        $Records.Count | Should -Be 2
+        $Records[0].identifier | Should -Be 'one'
+        $Records[1].identifier | Should -Be 'two'
+    }
+
+    It 'does not trust an older same-namespace SQLite wrapper' {
+        if ($null -eq ('VSCodeCouncil.Sqlite' -as [type]))
+        {
+            Add-Type -Namespace 'VSCodeCouncil' -Name 'Sqlite' -MemberDefinition 'public static int LegacyMarker() { return 1; }'
+        }
+
+        Initialize-SqliteInterop | Should -BeTrue
+        ('VSCodeCouncil.SqliteCacheV1' -as [type]) | Should -Not -BeNullOrEmpty
+    }
+
+    It 'retries one fresh snapshot before returning an empty catalog' {
+        $OriginalAppData = $env:APPDATA
+        $CacheRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-cache-$([guid]::NewGuid().ToString('N'))"
+
+        try
+        {
+            $env:APPDATA = $CacheRoot
+            $StateDirectory = Join-Path $CacheRoot 'Code\User\globalStorage'
+            New-Item -Path $StateDirectory -ItemType Directory -Force | Out-Null
+            New-Item -Path (Join-Path $StateDirectory 'state.vscdb') -ItemType File -Force | Out-Null
+            $script:CacheAttempts = 0
+
+            Mock Initialize-SqliteInterop { return $true }
+            Mock Get-CachedModelRecord {
+                $script:CacheAttempts++
+
+                if ($script:CacheAttempts -eq 1)
+                {
+                    return @()
+                }
+
+                return [PSCustomObject]@{
+                    Name = 'Recovered Model'
+                    Category = 'powerful'
+                }
+            }
+
+            $Models = @(Get-VSCodeModelCatalog)
+
+            $script:CacheAttempts | Should -Be 2
+            $Models.Count | Should -Be 1
+            $Models[0].Name | Should -Be 'Recovered Model'
+        }
+        finally
+        {
+            $env:APPDATA = $OriginalAppData
+            Remove-Variable CacheAttempts -Scope Script -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $CacheRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

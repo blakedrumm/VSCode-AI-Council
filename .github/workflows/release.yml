@@ -19,7 +19,7 @@ on:
       upload_sftp:
         description: Upload the .ps1 and .txt to the configured SFTP server
         required: true
-        default: true
+        default: false
         type: boolean
       prerelease:
         description: Mark the GitHub release as a prerelease

@@ -172,7 +172,7 @@
         August 11th, 2026
 
     Version:
-        5.7.0
+        5.7.1
 
     Compatible with:
         Windows PowerShell 5.1
@@ -296,7 +296,7 @@ $CoordinatorFileName = 'multi-model-engineering-council.agent.md'
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.0'
+$ScriptVersion = '5.7.1'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -976,7 +976,9 @@ function Get-PublishedScriptVersion
 # supported command-line way to read it.
 function Initialize-SqliteInterop
 {
-    if ('VSCodeCouncil.Sqlite' -as [type])
+    # The versioned type name prevents a wrapper loaded by an older development build from being
+    # mistaken for this contract in a long-lived, dot-sourced PowerShell session.
+    if ('VSCodeCouncil.SqliteCacheV1' -as [type])
     {
         return $true
     }
@@ -997,7 +999,7 @@ function Initialize-SqliteInterop
     {
         Write-Console 'Compiling SQLite interop. The first run in a new PowerShell process can take a few seconds.' -Level 'Detail'
 
-        Add-Type -Namespace 'VSCodeCouncil' -Name 'Sqlite' -MemberDefinition @"
+        Add-Type -Namespace 'VSCodeCouncil' -Name 'SqliteCacheV1' -MemberDefinition @"
 private const string SqliteLibrary = "$DllImportPath";
 
 [DllImport(SqliteLibrary, EntryPoint = "sqlite3_open_v2", CallingConvention = CallingConvention.Cdecl)]
@@ -1029,6 +1031,22 @@ public static extern int Close(IntPtr db);
         Write-Verbose "winsqlite3.dll is unavailable. $($_.Exception.Message)"
         return $false
     }
+}
+
+# Windows PowerShell 5.1 emits a top-level JSON array as one nested Object[] when ConvertFrom-Json
+# is called directly inside @(). Assigning first lets the second @() normalize both editions alike.
+function ConvertFrom-ModelCacheJson
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $Json
+    )
+
+    $ParsedValue = $Json | ConvertFrom-Json
+
+    return @($ParsedValue)
 }
 
 # Reads the cached model list out of one VS Code state database and returns a Name plus Category
@@ -1066,7 +1084,7 @@ function Get-CachedModelRecord
 
         $ReadOnly = 1
 
-        if ([VSCodeCouncil.Sqlite]::Open([System.Text.Encoding]::UTF8.GetBytes("$TempCopy`0"), [ref]$Database, $ReadOnly, [IntPtr]::Zero) -ne 0)
+        if ([VSCodeCouncil.SqliteCacheV1]::Open([System.Text.Encoding]::UTF8.GetBytes("$TempCopy`0"), [ref]$Database, $ReadOnly, [IntPtr]::Zero) -ne 0)
         {
             return @()
         }
@@ -1078,18 +1096,18 @@ function Get-CachedModelRecord
         {
             try
             {
-                if ([VSCodeCouncil.Sqlite]::Prepare($Database, [System.Text.Encoding]::UTF8.GetBytes("$Sql`0"), -1, [ref]$Statement, [IntPtr]::Zero) -ne 0)
+                if ([VSCodeCouncil.SqliteCacheV1]::Prepare($Database, [System.Text.Encoding]::UTF8.GetBytes("$Sql`0"), -1, [ref]$Statement, [IntPtr]::Zero) -ne 0)
                 {
                     continue
                 }
 
                 $SqliteRow = 100
 
-                if ([VSCodeCouncil.Sqlite]::Step($Statement) -eq $SqliteRow)
+                if ([VSCodeCouncil.SqliteCacheV1]::Step($Statement) -eq $SqliteRow)
                 {
                     # SQLite documents blob-then-bytes as the safe order; the reverse can force a type conversion.
-                    $Blob = [VSCodeCouncil.Sqlite]::ColumnBlob($Statement, 0)
-                    $Length = [VSCodeCouncil.Sqlite]::ColumnBytes($Statement, 0)
+                    $Blob = [VSCodeCouncil.SqliteCacheV1]::ColumnBlob($Statement, 0)
+                    $Length = [VSCodeCouncil.SqliteCacheV1]::ColumnBytes($Statement, 0)
                     $MaximumCacheLength = 64 * 1024 * 1024
 
                     if ($Length -gt $MaximumCacheLength)
@@ -1106,7 +1124,7 @@ function Get-CachedModelRecord
 
                         try
                         {
-                            $ParsedRecords = @([System.Text.Encoding]::UTF8.GetString($Buffer) | ConvertFrom-Json)
+                            $ParsedRecords = @(ConvertFrom-ModelCacheJson -Json ([System.Text.Encoding]::UTF8.GetString($Buffer)))
                         }
                         catch
                         {
@@ -1162,7 +1180,7 @@ function Get-CachedModelRecord
             {
                 if ($Statement -ne [IntPtr]::Zero)
                 {
-                    [void][VSCodeCouncil.Sqlite]::Release($Statement)
+                    [void][VSCodeCouncil.SqliteCacheV1]::Release($Statement)
                     $Statement = [IntPtr]::Zero
                 }
             }
@@ -1176,12 +1194,12 @@ function Get-CachedModelRecord
     {
         if ($Statement -ne [IntPtr]::Zero)
         {
-            [void][VSCodeCouncil.Sqlite]::Release($Statement)
+            [void][VSCodeCouncil.SqliteCacheV1]::Release($Statement)
         }
 
         if ($Database -ne [IntPtr]::Zero)
         {
-            [void][VSCodeCouncil.Sqlite]::Close($Database)
+            [void][VSCodeCouncil.SqliteCacheV1]::Close($Database)
         }
 
         Remove-Item -LiteralPath $TempCopy -Force -ErrorAction SilentlyContinue
@@ -1214,11 +1232,21 @@ function Get-VSCodeModelCatalog
             continue
         }
 
-        $Names = @(Get-CachedModelRecord -StatePath $StatePath)
+        $MaximumAttempts = 2
 
-        if ($Names.Count -gt 0)
+        for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++)
         {
-            return $Names
+            $Names = @(Get-CachedModelRecord -StatePath $StatePath)
+
+            if ($Names.Count -gt 0)
+            {
+                return $Names
+            }
+
+            if ($Attempt -lt $MaximumAttempts)
+            {
+                Write-Console 'The first VS Code model-cache snapshot was unreadable. Retrying with a fresh snapshot.' -Level 'Detail'
+            }
         }
     }
 
