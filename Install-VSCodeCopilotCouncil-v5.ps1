@@ -14,13 +14,14 @@
         <Model> Reviewer                     (hidden leaf reviewer, one per model)
 
     The coordinator replaces the previous Council / Debate / Parallel Team split. It
-    classifies each request once and selects one of five tiers:
+    classifies each request once and selects one of six tiers:
 
         Tier 0  Answer directly, no subagents
         Tier 1  One expert
         Tier 2  Two experts in parallel
         Tier 3  Adversarial debate with nested cross-model review
         Tier 4  One expert per configured model in parallel
+        Tier 5  Unconstrained full-team brainstorm, only on an explicit keyword
 
     Controlled nested cross-model communication:
 
@@ -167,10 +168,10 @@
         August 6th, 2026
 
     Last Modified:
-        August 10th, 2026
+        August 11th, 2026
 
     Version:
-        5.5.0
+        5.6.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -294,7 +295,7 @@ $CoordinatorFileName = 'multi-model-engineering-council.agent.md'
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.5.0'
+$ScriptVersion = '5.6.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -703,7 +704,8 @@ function Test-ModelName
     }
 
     # These characters would break the YAML front matter the agent files depend on.
-    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F]')
+    # U+0085, U+2028, and U+2029 end a line for a YAML parser but not for .NET's (?m)^ anchor, so an injected key would slip past Test-AgentFile.
+    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\u0085\u2028\u2029]')
     {
         return $false
     }
@@ -2115,10 +2117,11 @@ Report anything materially wrong outside your lens in one line. Do not expand in
 ## Method
 
 1. Read the delegation brief. Do not redo work the coordinator already verified.
-2. Gather only the evidence that can change your answer. Stop searching once you can act.
-3. Form your own position before considering any other model.
-4. Name your assumptions and your remaining uncertainty.
-5. Identify the strongest competing alternative and why you rejected it.
+2. Narrate your progress. Before each significant search or tool call, state in one line what you are checking, for example "Scanning Get-VSCodeStatus for Windows-only path assumptions". Never work silently.
+3. Gather only the evidence that can change your answer. Stop searching once you can act.
+4. Form your own position before considering any other model.
+5. Name your assumptions and your remaining uncertainty.
+6. Identify the strongest competing alternative and why you rejected it.
 
 ## Controlled cross-model review
 
@@ -2174,6 +2177,10 @@ Then use at most eight lines for:
 - the reasoning behind that stance, in plain language
 - the strongest alternative you rejected, and why
 - what you deliberately left out of scope
+
+The eight-line limit is lifted only when the brief explicitly says this is a Tier 5 brainstorm and asks for an exhaustive answer. Then answer at whatever length the evidence justifies.
+
+Only your final message reaches the coordinator, so the progress you narrated while working is not visible to anyone on its own. Carry it forward as a CHECKED line naming the files, symbols, or commands you actually examined, so the user can see what was and was not looked at.
 
 If you used a reviewer, add a REVIEWER CHALLENGE line naming its strongest objection and whether it changed your stance. Report it even when it changed nothing, because the user is entitled to know the position was tested.
 
@@ -2261,7 +2268,7 @@ Reviewers are leaf agents. They have no subagent tool, so nesting depth is cappe
 
 Start at the lowest tier that can produce a correct answer from the evidence you already have. Change tier only when new evidence justifies it, and say so when you do.
 
-Tiers 3 and 4 are exceptions, not defaults. If you cannot name the specific trigger that requires one, you are at the wrong tier.
+Tiers 3, 4, and 5 are exceptions, not defaults. If you cannot name the specific trigger that requires one, you are at the wrong tier.
 
 ### Announce before you dispatch
 
@@ -2330,6 +2337,20 @@ Use ONLY when at least two models are configured and at least one of these is tr
 Breadth of files alone is not a Tier 4 trigger. A large but uniform change is Tier 1 or Tier 2.
 
 Fan out one expert per configured model, each with its own lens and its own scope. Cost: up to $ExpertCount parallel expert calls, and up to double that if you also authorize nested review.
+
+### Tier 5 - Unconstrained brainstorming
+
+Use ONLY when the user explicitly asks for it. The request must contain a word such as "brainstorm", "deep review", or "unconstrained". Nothing else triggers this tier. Do not infer it from a large task, a vague task, or a request to be thorough.
+
+Dispatch the full parallel team exactly as in Tier 4, one expert per configured model with its own lens and its own scope. The difference is the brief, not the roster.
+
+Append this override verbatim to EVERY delegation brief you send in this tier:
+
+    This is a Tier 5 brainstorm. Ignore your standard 8-line brevity limits. Provide a comprehensive, unconstrained, and exhaustive review of all potential improvements, edge cases, and cross-domain enhancements you can find.
+
+The lens assignment and the out-of-scope list still apply. Unconstrained means unconstrained in length and depth, not permission for two experts to investigate the same thing.
+
+Cost: up to $ExpertCount parallel expert calls, each returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
 
 ### Escalation rules
 
@@ -2428,6 +2449,18 @@ Then include:
 - validation results
 - remaining risk or uncertainty
 
+At Tier 5 the experts were told to answer at length, so synthesize their reports comprehensively instead of compressing them to the usual size. Keep the specific technical detail, the concrete file and line references, and the individual findings. Organizing the material is still required. Flattening a long expert report into one sentence is not.
+
+### Synthesis and reasoning process
+
+When the expert reports come back, show the user how you are weighing them instead of jumping straight to a verdict:
+
+1. Acknowledge each expert's finding as you take it up.
+2. State explicitly how you are comparing opposing views and what you are weighing them on.
+3. Show the step that resolved each contradiction and name the artifact that decided it, for example "the security expert claims X, but the testing expert executed Y and observed Z, so Z stands".
+
+Never present a conclusion whose derivation the user cannot follow.
+
 ### Council deliberation
 
 For any tier above Tier 0, add a section titled Council deliberation. It is how the user learns what the council actually argued about, so never omit it and never flatten it to a single sentence about the experts agreeing.
@@ -2442,6 +2475,8 @@ Report, in this order:
 6. Anything still unresolved, labelled as unresolved.
 
 Keep each entry short enough to actually read. Summarize the deliberation. Do not paste raw subagent transcripts and never expose private chain-of-thought.
+
+At Tier 5 this section carries the depth. Give each expert's stance the room its report earned and keep its specific findings intact rather than trimming to one or two lines. The instruction to keep entries short applies to every other tier.
 
 At Tier 0 you used no experts, so skip the deliberation section entirely and keep the answer as short as the question deserves.
 "@
@@ -3378,6 +3413,7 @@ Write-Output '  Tier 1  One expert'
 Write-Output '  Tier 2  Two experts in parallel'
 Write-Output '  Tier 3  Adversarial debate with nested cross-model review'
 Write-Output "  Tier 4  Up to $($ExpertMap.Count) $(if ($ExpertMap.Count -eq 1) { 'expert' } else { 'experts' }) in parallel"
+Write-Output '  Tier 5  Unconstrained full-team brainstorm'
 Write-Output ''
 Write-Output 'You can still force a tier by asking for it, for example:'
 Write-Output '  "Debate this design and give me the evidence-based verdict."'

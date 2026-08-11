@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.6.0
+
+### Added
+
+- **Tier 5, unconstrained brainstorming.** A sixth coordinator tier that dispatches the full parallel
+  team and appends an explicit override to every delegation brief, lifting the expert eight-line limit
+  so each one returns an exhaustive report. It triggers only on an explicit keyword such as brainstorm,
+  deep review, or unconstrained, and the coordinator is forbidden from selecting it on its own
+  initiative.
+- **Expert progress narration.** Experts now state what they are checking before each significant
+  search or tool call, and carry that trace into their report as a CHECKED line, since only their final
+  message reaches the coordinator.
+- **Visible synthesis reasoning.** The coordinator now shows how it weighs opposing expert findings and
+  names the artifact that resolved each contradiction, rather than presenting a verdict whose
+  derivation cannot be followed.
+
+### Fixed
+
+- **Unicode line terminator bypass in model name validation.** `Test-ModelName` rejected the ASCII
+  control range but accepted U+0085, U+2028, and U+2029. Those terminate a line for a YAML parser but
+  not for the .NET multiline anchor that post-install validation counts front matter keys with, so a
+  crafted model name could have introduced a second front matter key the validator never saw. All three
+  are now rejected. No real model name is affected.
+
 ## 5.5.0
 
 First public release.

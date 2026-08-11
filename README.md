@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.5.0-blue" alt="Version 5.5.0">
+  <img src="https://img.shields.io/badge/version-5.6.0-blue" alt="Version 5.6.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -57,7 +57,7 @@ Reviewers cannot invoke subagents, which caps nesting at two levels. A recursion
 
 Each expert may consult exactly one reviewer, exactly once, and never its own. An expert running Claude can only be challenged by a reviewer running something other than Claude.
 
-## The five tiers
+## The six tiers
 
 The coordinator classifies each request once and picks the cheapest strategy that can still produce a defensible answer. It announces the tier and the question each expert was asked before it dispatches anything, so a fan out never looks like a frozen session.
 
@@ -68,8 +68,9 @@ The coordinator classifies each request once and picks the cheapest strategy tha
 | 2 | Two experts in parallel | 2 calls | The task spans two lenses, or touches shared code and public behavior |
 | 3 | Adversarial debate | ~4 calls | You asked for a debate, or a disagreement survived that no tool could settle |
 | 4 | Full parallel team | up to 5 calls | You asked for the full team, or the work spans genuinely independent subsystems |
+| 5 | Unconstrained brainstorm | up to 5 long calls | You explicitly said brainstorm, deep review, or unconstrained. Every expert is told to drop its brevity limit and answer exhaustively |
 
-Tiers 3 and 4 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, and from spending an expert call on something a single tool call can verify.
+Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, from spending an expert call on something a single tool call can verify, and from selecting Tier 5 on its own initiative.
 
 Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won.
 
