@@ -71,7 +71,8 @@
     for example with -ModelCatalog, the picker falls back to name-based rules and the recommendation
     is correspondingly weaker. The picker prints the date the rule was last revised alongside it.
 
-    Existing agent files and VS Code settings are backed up before modification.
+    Existing agent files and VS Code settings are backed up before modification and restored if
+    agent activation fails before the new roster is fully validated.
 
 .PARAMETER Scope
     Determines where the custom agent files are installed.
@@ -129,8 +130,8 @@
 .PARAMETER SkipUpdateCheck
     Prevents the script from contacting GitHub to compare its own version against the published one.
 
-    The check only reads a version string. It never downloads or runs remote code, and a failed or
-    blocked check never stops the installation.
+    The check reads the latest release tag from the GitHub API. It never downloads or runs release
+    assets or scripts, and a failed or blocked check never stops the installation.
 
 .PARAMETER NonInteractive
     Suppresses all prompts. Requires -Models, or reuses the configuration of an earlier
@@ -138,7 +139,7 @@
 
 .PARAMETER OpenInVSCode
     Opens the installed coordinator agent file and the VS Code settings file after
-    installation when the "code" command is available.
+    installation when a standard VS Code installation and its CLI are detected.
 
 .EXAMPLE
     .\Install-VSCodeCopilotCouncil-v5.ps1
@@ -171,7 +172,7 @@
         August 11th, 2026
 
     Version:
-        5.6.1
+        5.7.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -186,8 +187,8 @@
     Important:
         The script does not enable global tool auto-approval.
         The script does not enable unrestricted recursive agents.
-        The update check never downloads or executes remote code. It reads a version string and
-        prints a link, so any upgrade stays a deliberate act by the user.
+        The update check reads release metadata but never downloads or executes release assets or
+        scripts. It prints a link, so any upgrade stays a deliberate act by the user.
 
     License:
         MIT License
@@ -295,7 +296,7 @@ $CoordinatorFileName = 'multi-model-engineering-council.agent.md'
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.6.1'
+$ScriptVersion = '5.7.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -610,6 +611,7 @@ function Write-Utf8File
     # Written to a sibling temp file and swapped in, so an interrupted run cannot truncate the target.
     $TemporaryPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     $ReplacedPath = "$Path.$([guid]::NewGuid().ToString('N')).old"
+    $KeepReplacedPath = $false
 
     try
     {
@@ -624,8 +626,47 @@ function Write-Utf8File
             }
             catch
             {
-                Write-Verbose "Atomic replace was unavailable for $Path, so the file was written directly. $($_.Exception.Message)"
-                [System.IO.File]::WriteAllText($Path, $OutputContent, $Utf8WithoutBom)
+                $ReplaceError = $_.Exception.Message
+                $TargetMatchesOutput = $false
+
+                if ([System.IO.File]::Exists($Path))
+                {
+                    try
+                    {
+                        $TargetMatchesOutput = [System.IO.File]::ReadAllText($Path, $Utf8WithoutBom) -ceq $OutputContent
+                    }
+                    catch
+                    {
+                        $TargetMatchesOutput = $false
+                    }
+                }
+
+                if ($TargetMatchesOutput)
+                {
+                    # Some filesystem filters report a metadata error after the data swap completed.
+                    Write-Verbose "Atomic replace completed for $Path despite a reported error. $ReplaceError"
+                }
+                else
+                {
+                    if (-not [System.IO.File]::Exists($Path) -and [System.IO.File]::Exists($ReplacedPath))
+                    {
+                        try
+                        {
+                            [System.IO.File]::Move($ReplacedPath, $Path)
+                        }
+                        catch
+                        {
+                            $KeepReplacedPath = $true
+                        }
+                    }
+                    elseif ([System.IO.File]::Exists($ReplacedPath))
+                    {
+                        $KeepReplacedPath = $true
+                    }
+
+                    $RecoveryText = if ($KeepReplacedPath) { " Recovery copy: $ReplacedPath" } else { '' }
+                    throw "Atomic replacement failed for $Path. The live file was not overwritten directly.$RecoveryText $ReplaceError"
+                }
             }
         }
         else
@@ -636,7 +677,88 @@ function Write-Utf8File
     finally
     {
         Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $ReplacedPath -Force -ErrorAction SilentlyContinue
+
+        if (-not $KeepReplacedPath)
+        {
+            Remove-Item -LiteralPath $ReplacedPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Reads UTF-8 with invalid-byte detection. Windows PowerShell 5.1 otherwise treats BOM-less files
+# as the active ANSI code page, while the permissive .NET decoder silently inserts U+FFFD.
+function Read-Utf8File
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $Path
+    )
+
+    $StrictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+
+    try
+    {
+        return [System.IO.File]::ReadAllText($Path, $StrictUtf8)
+    }
+    catch [System.Text.DecoderFallbackException]
+    {
+        throw "File is not valid UTF-8 and was not read: $Path"
+    }
+}
+
+# Captures exact bytes and basic attributes for rollback without interpreting the file's encoding.
+function Get-FileStateSnapshot
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $Path
+    )
+
+    $Exists = [System.IO.File]::Exists($Path)
+
+    return [PSCustomObject]@{
+        Path = $Path
+        Existed = $Exists
+        Bytes = $(if ($Exists) { [System.IO.File]::ReadAllBytes($Path) } else { $null })
+        Attributes = $(if ($Exists) { [System.IO.File]::GetAttributes($Path) } else { $null })
+    }
+}
+
+# Restores a snapshot taken by Get-FileStateSnapshot. This is only used after a failed commit.
+function Restore-FileStateSnapshot
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [object]
+        $Snapshot
+    )
+
+    if ($Snapshot.Existed)
+    {
+        $ParentDirectory = Split-Path -Path $Snapshot.Path -Parent
+
+        if (-not (Test-Path -LiteralPath $ParentDirectory))
+        {
+            New-Item -Path $ParentDirectory -ItemType Directory -Force | Out-Null
+        }
+
+        if ([System.IO.File]::Exists($Snapshot.Path))
+        {
+            [System.IO.File]::SetAttributes($Snapshot.Path, [System.IO.FileAttributes]::Normal)
+        }
+
+        [System.IO.File]::WriteAllBytes($Snapshot.Path, $Snapshot.Bytes)
+        [System.IO.File]::SetAttributes($Snapshot.Path, $Snapshot.Attributes)
+    }
+    elseif ([System.IO.File]::Exists($Snapshot.Path))
+    {
+        [System.IO.File]::SetAttributes($Snapshot.Path, [System.IO.FileAttributes]::Normal)
+        [System.IO.File]::Delete($Snapshot.Path)
     }
 }
 
@@ -703,9 +825,15 @@ function Test-ModelName
         return $false
     }
 
+    if ($Name.Length -gt 100 -or $Name -cne $Name.Trim())
+    {
+        return $false
+    }
+
     # These characters would break the YAML front matter the agent files depend on.
     # U+0085, U+2028, and U+2029 end a line for a YAML parser but not for .NET's (?m)^ anchor, so an injected key would slip past Test-AgentFile.
-    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\u0085\u2028\u2029]')
+    # Unicode format and surrogate code points are rejected to prevent invisible or malformed names.
+    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\u0085\u2028\u2029\p{Cf}\p{Cs}]')
     {
         return $false
     }
@@ -771,11 +899,6 @@ function Get-PropertyValue
 
 # Returns the version string published for this script, or $null if it cannot be determined.
 #
-# Two sources are tried in order:
-#   1. The GitHub releases API, which is small and fast but requires a tagged release.
-#   2. The raw script file on the default branch, which works for a repository that only
-#      receives plain commits.
-#
 # Every failure path returns $null rather than throwing, because a blocked network, a proxy, or
 # a deleted repository must never stop someone from installing.
 function Get-PublishedScriptVersion
@@ -791,8 +914,8 @@ function Get-PublishedScriptVersion
         $TimeoutSeconds
     )
 
-    # This reads a version string and nothing else. An installer that pulls and runs remote code on
-    # its own is a supply-chain risk the user never gets to review, so upgrading stays manual.
+    # Only release metadata is read. Release assets and scripts are never downloaded or executed,
+    # so upgrading stays a manual action the user can review first.
     $PreviousProtocol = [Net.ServicePointManager]::SecurityProtocol
     $ProgressPreference = 'SilentlyContinue'
 
@@ -827,24 +950,7 @@ function Get-PublishedScriptVersion
         }
         catch
         {
-            Write-Verbose "No published release for $Repository. Falling back to the script header. $($_.Exception.Message)"
-        }
-
-        # A repository that only receives plain commits has no release to read, so the version is
-        # taken from the constant in the published script instead.
-        $Response = Invoke-WebRequest `
-            -Uri "https://raw.githubusercontent.com/$Repository/HEAD/Install-VSCodeCopilotCouncil-v5.ps1" `
-            -Headers @{ 'User-Agent' = 'Install-VSCodeCopilotCouncil' } `
-            -UseBasicParsing `
-            -TimeoutSec $TimeoutSeconds `
-            -ErrorAction Stop
-
-        # Bounded to digits and dots, so a tampered repository cannot inject anything else here.
-        $VersionMatch = [regex]::Match([string]$Response.Content, '\$ScriptVersion\s*=\s*''([0-9]+(?:\.[0-9]+){1,3})''')
-
-        if ($VersionMatch.Success)
-        {
-            return $VersionMatch.Groups[1].Value
+            Write-Verbose "No published release metadata could be read for $Repository. $($_.Exception.Message)"
         }
     }
     catch
@@ -970,78 +1076,96 @@ function Get-CachedModelRecord
                 "SELECT value FROM ItemTable WHERE key='chat.cachedLanguageModels'"
             ))
         {
-            if ([VSCodeCouncil.Sqlite]::Prepare($Database, [System.Text.Encoding]::UTF8.GetBytes("$Sql`0"), -1, [ref]$Statement, [IntPtr]::Zero) -ne 0)
+            try
             {
-                continue
-            }
-
-            $SqliteRow = 100
-
-            if ([VSCodeCouncil.Sqlite]::Step($Statement) -eq $SqliteRow)
-            {
-                # SQLite documents blob-then-bytes as the safe order; the reverse can force a type conversion.
-                $Blob = [VSCodeCouncil.Sqlite]::ColumnBlob($Statement, 0)
-                $Length = [VSCodeCouncil.Sqlite]::ColumnBytes($Statement, 0)
-                $MaximumCacheLength = 64 * 1024 * 1024
-
-                if ($Length -gt $MaximumCacheLength)
+                if ([VSCodeCouncil.Sqlite]::Prepare($Database, [System.Text.Encoding]::UTF8.GetBytes("$Sql`0"), -1, [ref]$Statement, [IntPtr]::Zero) -ne 0)
                 {
-                    # Skipped rather than thrown, so the older cache key is still tried.
-                    Write-Verbose "Skipping the VS Code model cache value because it is implausibly large ($Length bytes)."
-                    $Length = 0
+                    continue
                 }
 
-                if ($Length -gt 0 -and $Blob -ne [IntPtr]::Zero)
+                $SqliteRow = 100
+
+                if ([VSCodeCouncil.Sqlite]::Step($Statement) -eq $SqliteRow)
                 {
-                    $Buffer = New-Object byte[] $Length
-                    [System.Runtime.InteropServices.Marshal]::Copy($Blob, $Buffer, 0, $Length)
+                    # SQLite documents blob-then-bytes as the safe order; the reverse can force a type conversion.
+                    $Blob = [VSCodeCouncil.Sqlite]::ColumnBlob($Statement, 0)
+                    $Length = [VSCodeCouncil.Sqlite]::ColumnBytes($Statement, 0)
+                    $MaximumCacheLength = 64 * 1024 * 1024
 
-                    $Records = New-Object System.Collections.Generic.List[object]
-                    $SeenNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
-
-                    foreach ($Record in ([System.Text.Encoding]::UTF8.GetString($Buffer) | ConvertFrom-Json))
+                    if ($Length -gt $MaximumCacheLength)
                     {
-                        if ((Get-PropertyValue -InputObject $Record -Name 'identifier') -notlike 'copilot/*')
-                        {
-                            continue
-                        }
-
-                        $Metadata = Get-PropertyValue -InputObject $Record -Name 'metadata'
-
-                        if ((Get-PropertyValue -InputObject $Metadata -Name 'isUserSelectable') -ne $true)
-                        {
-                            continue
-                        }
-
-                        $Capabilities = Get-PropertyValue -InputObject $Metadata -Name 'capabilities'
-
-                        if ((Get-PropertyValue -InputObject $Capabilities -Name 'agentMode') -ne $true)
-                        {
-                            continue
-                        }
-
-                        $Name = [string](Get-PropertyValue -InputObject $Metadata -Name 'name')
-
-                        if ((Test-ModelName -Name $Name) -and $SeenNames.Add($Name))
-                        {
-                            # VS Code publishes powerful, versatile, or lightweight per model. That beats
-                            # inferring size from the name, which carries no signal for names like Luna.
-                            $Records.Add([PSCustomObject]@{
-                                    Name = $Name
-                                    Category = [string](Get-PropertyValue -InputObject $Metadata -Name 'category')
-                                })
-                        }
+                        # Skipped rather than thrown, so the older cache key is still tried.
+                        Write-Verbose "Skipping the VS Code model cache value because it is implausibly large ($Length bytes)."
+                        $Length = 0
                     }
 
-                    if ($Records.Count -gt 0)
+                    if ($Length -gt 0 -and $Blob -ne [IntPtr]::Zero)
                     {
-                        return @($Records | Sort-Object -Property 'Name')
+                        $Buffer = New-Object byte[] $Length
+                        [System.Runtime.InteropServices.Marshal]::Copy($Blob, $Buffer, 0, $Length)
+
+                        try
+                        {
+                            $ParsedRecords = @([System.Text.Encoding]::UTF8.GetString($Buffer) | ConvertFrom-Json)
+                        }
+                        catch
+                        {
+                            Write-Verbose "Skipping malformed JSON from VS Code model cache key in $StatePath. $($_.Exception.Message)"
+                            continue
+                        }
+
+                        $Records = New-Object System.Collections.Generic.List[object]
+                        $SeenNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
+
+                        foreach ($Record in $ParsedRecords)
+                        {
+                            if ((Get-PropertyValue -InputObject $Record -Name 'identifier') -notlike 'copilot/*')
+                            {
+                                continue
+                            }
+
+                            $Metadata = Get-PropertyValue -InputObject $Record -Name 'metadata'
+
+                            if ((Get-PropertyValue -InputObject $Metadata -Name 'isUserSelectable') -ne $true)
+                            {
+                                continue
+                            }
+
+                            $Capabilities = Get-PropertyValue -InputObject $Metadata -Name 'capabilities'
+
+                            if ((Get-PropertyValue -InputObject $Capabilities -Name 'agentMode') -ne $true)
+                            {
+                                continue
+                            }
+
+                            $Name = [string](Get-PropertyValue -InputObject $Metadata -Name 'name')
+
+                            if ((Test-ModelName -Name $Name) -and $SeenNames.Add($Name))
+                            {
+                                # VS Code publishes powerful, versatile, or lightweight per model. That beats
+                                # inferring size from the name, which carries no signal for names like Luna.
+                                $Records.Add([PSCustomObject]@{
+                                        Name = $Name
+                                        Category = [string](Get-PropertyValue -InputObject $Metadata -Name 'category')
+                                    })
+                            }
+                        }
+
+                        if ($Records.Count -gt 0)
+                        {
+                            return @($Records | Sort-Object -Property 'Name')
+                        }
                     }
                 }
             }
-
-            [void][VSCodeCouncil.Sqlite]::Release($Statement)
-            $Statement = [IntPtr]::Zero
+            finally
+            {
+                if ($Statement -ne [IntPtr]::Zero)
+                {
+                    [void][VSCodeCouncil.Sqlite]::Release($Statement)
+                    $Statement = [IntPtr]::Zero
+                }
+            }
         }
     }
     catch
@@ -1132,7 +1256,7 @@ function Get-PreviousCouncilConfiguration
 
     try
     {
-        $Lines = @(Get-Content -LiteralPath $CoordinatorPath)
+        $Lines = @((Read-Utf8File -Path $CoordinatorPath) -split '\r?\n')
     }
     catch
     {
@@ -1294,14 +1418,21 @@ function Get-ModelVersion
         return [version]::new(0, 0)
     }
 
-    $Minor = 0
+    $Major = 0
 
-    if ($Match.Groups[2].Success)
+    if (-not [int]::TryParse($Match.Groups[1].Value, [ref]$Major))
     {
-        $Minor = [int]$Match.Groups[2].Value
+        return [version]::new(0, 0)
     }
 
-    return [version]::new([int]$Match.Groups[1].Value, $Minor)
+    $Minor = 0
+
+    if ($Match.Groups[2].Success -and -not [int]::TryParse($Match.Groups[2].Value, [ref]$Minor))
+    {
+        return [version]::new(0, 0)
+    }
+
+    return [version]::new($Major, $Minor)
 }
 
 # Picks up to MaximumCount models from the supplied catalog, in the order they should be assigned
@@ -1337,9 +1468,11 @@ function Get-RecommendedModelSet
         $CategoryMap = @{}
     }
 
+    $SeenCatalogNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+
     $Candidates = @(
         $Catalog |
-            Where-Object { (Test-ModelName -Name $_) -and $_ -notmatch '(?i)^auto$' } |
+            Where-Object { (Test-ModelName -Name $_) -and $_ -notmatch '(?i)^auto$' -and $SeenCatalogNames.Add($_) } |
             ForEach-Object {
                 $Category = ''
 
@@ -1545,7 +1678,7 @@ function Select-ModelList
 
                 $Selected.Add($Catalog[$Position - 1])
             }
-            elseif ($Token -eq 'c')
+            elseif ($Token -match '^[Cc]$')
             {
                 $Custom = "$(Read-Host -Prompt 'Custom model name')".Trim()
 
@@ -1764,6 +1897,95 @@ function ConvertFrom-JsoncText
     return ($StrictJson | ConvertFrom-Json)
 }
 
+# Locates a property value on the root JSON object without mistaking comments, strings, nested
+# objects, or arrays for the setting. The returned offsets map directly onto the original text.
+function Get-RootJsonPropertyToken
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]
+        $Text,
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $PropertyName
+    )
+
+    $Masked = ConvertTo-CommentMaskedJson -Text $Text
+    $Tokens = [regex]::Matches($Masked, '"(?:\\.|[^"\\])*"|[{}\[\]:,]|true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?')
+    $ObjectDepth = 0
+    $ArrayDepth = 0
+    $RootOpenBraceIndex = -1
+    $ValueMatches = New-Object System.Collections.Generic.List[object]
+
+    for ($Index = 0; $Index -lt $Tokens.Count; $Index++)
+    {
+        $Token = $Tokens[$Index]
+
+        switch ($Token.Value)
+        {
+            '{'
+            {
+                if ($RootOpenBraceIndex -lt 0 -and $ObjectDepth -eq 0 -and $ArrayDepth -eq 0)
+                {
+                    $RootOpenBraceIndex = $Token.Index
+                }
+
+                $ObjectDepth++
+                continue
+            }
+            '}'
+            {
+                $ObjectDepth--
+                continue
+            }
+            '['
+            {
+                $ArrayDepth++
+                continue
+            }
+            ']'
+            {
+                $ArrayDepth--
+                continue
+            }
+        }
+
+        if ($ObjectDepth -ne 1 -or $ArrayDepth -ne 0 -or -not $Token.Value.StartsWith('"'))
+        {
+            continue
+        }
+
+        try
+        {
+            $DecodedName = [string]($Token.Value | ConvertFrom-Json)
+        }
+        catch
+        {
+            continue
+        }
+
+        if ($DecodedName -cne $PropertyName -or $Index + 2 -ge $Tokens.Count -or $Tokens[$Index + 1].Value -ne ':')
+        {
+            continue
+        }
+
+        $ValueToken = $Tokens[$Index + 2]
+        $ValueMatches.Add([PSCustomObject]@{
+                Index = $ValueToken.Index
+                Length = $ValueToken.Length
+                Value = $ValueToken.Value
+            })
+    }
+
+    return [PSCustomObject]@{
+        RootOpenBraceIndex = $RootOpenBraceIndex
+        ValueMatches = $ValueMatches.ToArray()
+    }
+}
+
 # Turns on nested subagents in the user's settings.json, which the council needs so an expert can
 # consult a reviewer.
 #
@@ -1793,17 +2015,8 @@ function Set-VSCodeNestedSubagentsSetting
         New-Item -Path $SettingsDirectory -ItemType Directory -Force | Out-Null
     }
 
-    if (-not (Test-Path -LiteralPath $SettingsPath))
-    {
-        Write-Utf8File -Path $SettingsPath -Content '{}'
-        Write-Console "Created VS Code settings file: $SettingsPath"
-    }
-    else
-    {
-        Backup-ExistingFile -Path $SettingsPath -BackupDirectory $BackupDirectory
-    }
-
-    $Content = [System.IO.File]::ReadAllText($SettingsPath, [System.Text.Encoding]::UTF8)
+    $SettingsExisted = Test-Path -LiteralPath $SettingsPath
+    $Content = if ($SettingsExisted) { Read-Utf8File -Path $SettingsPath } else { '{}' }
 
     if ([string]::IsNullOrWhiteSpace($Content))
     {
@@ -1824,24 +2037,35 @@ function Set-VSCodeNestedSubagentsSetting
         $NewLine = "`n"
     }
 
-    # Match against the comment-masked copy so a commented-out setting is never edited in place.
-    # Masking preserves length, so every offset taken from $Masked maps onto $Content unchanged.
-    $Masked = ConvertTo-CommentMaskedJson -Text $Content
-    $SettingMatch = [regex]::Match($Masked, '"' + [regex]::Escape($SettingName) + '"\s*:\s*(true|false)')
+    $PropertyToken = Get-RootJsonPropertyToken -Text $Content -PropertyName $SettingName
+    $SettingMatches = @($PropertyToken.ValueMatches)
 
-    if ($SettingMatch.Success)
+    if ($SettingMatches.Count -gt 1)
     {
-        $ValueGroup = $SettingMatch.Groups[1]
-        $UpdatedContent = $Content.Remove($ValueGroup.Index, $ValueGroup.Length).Insert($ValueGroup.Index, 'true')
+        throw "$SettingName appears more than once on the root object in $SettingsPath. Remove the duplicate, then re-run."
     }
-    elseif ([regex]::IsMatch($Masked, '"' + [regex]::Escape($SettingName) + '"\s*:'))
+
+    if ($SettingMatches.Count -eq 1)
     {
-        # The key exists with something other than true/false. Inserting a second copy would create a duplicate key.
-        throw "$SettingName already exists in $SettingsPath with a value that is not true or false. Correct it by hand, then re-run."
+        $SettingMatch = $SettingMatches[0]
+
+        if ($SettingMatch.Value -eq 'true')
+        {
+            Write-Console "VS Code setting is already enabled: $SettingName = true"
+            Write-Console "VS Code settings file: $SettingsPath"
+            return $false
+        }
+
+        if ($SettingMatch.Value -ne 'false')
+        {
+            throw "$SettingName already exists in $SettingsPath with a value that is not true or false. Correct it by hand, then re-run."
+        }
+
+        $UpdatedContent = $Content.Remove($SettingMatch.Index, $SettingMatch.Length).Insert($SettingMatch.Index, 'true')
     }
     else
     {
-        $OpenBraceIndex = $Masked.IndexOf([char]'{')
+        $OpenBraceIndex = $PropertyToken.RootOpenBraceIndex
 
         if ($OpenBraceIndex -lt 0)
         {
@@ -1851,13 +2075,16 @@ function Set-VSCodeNestedSubagentsSetting
         # Inserting always beats rebuilding the object, because rebuilding would discard the user's comments.
         # A root object holding nothing but whitespace or comments must not gain a trailing comma.
         $Separator = ''
+        $Masked = ConvertTo-CommentMaskedJson -Text $Content
 
         if ($Masked.Substring($OpenBraceIndex + 1) -match '[^\s}]')
         {
             $Separator = ','
         }
 
-        $SettingLine = $NewLine + "  `"$SettingName`": true$Separator" + $NewLine
+        $TextAfterOpenBrace = $Content.Substring($OpenBraceIndex + 1)
+        $NeedsTrailingNewLine = -not ($TextAfterOpenBrace.StartsWith("`r`n") -or $TextAfterOpenBrace.StartsWith("`n"))
+        $SettingLine = $NewLine + "  `"$SettingName`": true$Separator" + $(if ($NeedsTrailingNewLine) { $NewLine } else { '' })
         $UpdatedContent = $Content.Insert($OpenBraceIndex + 1, $SettingLine)
     }
 
@@ -1876,12 +2103,29 @@ function Set-VSCodeNestedSubagentsSetting
         throw "Refusing to write $SettingsPath because the update did not set $SettingName to true."
     }
 
+    if ($SettingsExisted)
+    {
+        $CurrentContent = Read-Utf8File -Path $SettingsPath
+
+        if ($CurrentContent -cne $Content)
+        {
+            throw "VS Code settings changed while the installer was preparing its update. Nothing was written: $SettingsPath"
+        }
+
+        Backup-ExistingFile -Path $SettingsPath -BackupDirectory $BackupDirectory
+    }
+
     # PreserveLineEndings keeps the user's existing CRLF or LF style instead of rewriting the whole file.
     Write-Utf8File -Path $SettingsPath -Content $UpdatedContent -PreserveLineEndings
 
+    if (-not $SettingsExisted)
+    {
+        Write-Console "Created VS Code settings file: $SettingsPath"
+    }
+
     try
     {
-        $WrittenSettings = ConvertFrom-JsoncText -Text ([System.IO.File]::ReadAllText($SettingsPath, [System.Text.Encoding]::UTF8))
+        $WrittenSettings = ConvertFrom-JsoncText -Text (Read-Utf8File -Path $SettingsPath)
     }
     catch
     {
@@ -1895,6 +2139,8 @@ function Set-VSCodeNestedSubagentsSetting
 
     Write-Console "Enabled VS Code setting: $SettingName = true"
     Write-Console "VS Code settings file: $SettingsPath"
+
+    return $true
 }
 
 #endregion
@@ -1909,9 +2155,9 @@ function Set-VSCodeNestedSubagentsSetting
 
 # Builds the YAML header every agent file starts with.
 #
-# user-invocable false hides an agent from the picker, and disable-model-invocation true stops
-# unrelated agents from recruiting it. Together they keep the workers hidden but reachable by the
-# coordinator, which lists them explicitly in its own agents property.
+# user-invocable false hides a worker from the picker, while disable-model-invocation false leaves
+# it eligible for the explicit subagent allowlists generated below. The selectable coordinator uses
+# disable-model-invocation true so another agent cannot recruit the whole council as one subagent.
 function New-AgentFrontMatter
 {
     param
@@ -1933,6 +2179,10 @@ function New-AgentFrontMatter
         $UserInvocable,
 
         [Parameter(Mandatory = $true)]
+        [bool]
+        $DisableModelInvocation,
+
+        [Parameter(Mandatory = $true)]
         [string[]]
         $Tools,
 
@@ -1948,7 +2198,7 @@ function New-AgentFrontMatter
     $Lines.Add("model: `"$Model`"")
     $Lines.Add('target: vscode')
     $Lines.Add("user-invocable: $(if ($UserInvocable) { 'true' } else { 'false' })")
-    $Lines.Add('disable-model-invocation: true')
+    $Lines.Add("disable-model-invocation: $(if ($DisableModelInvocation) { 'true' } else { 'false' })")
     $Lines.Add("tools: [$(($Tools | ForEach-Object { "'$_'" }) -join ', ')]")
 
     if ($null -ne $Agents -and $Agents.Count -gt 0)
@@ -1981,6 +2231,7 @@ function New-ReviewerAgentContent
         -Description "Leaf peer reviewer running $ModelName. Challenges an expert conclusion and cannot invoke subagents." `
         -Model $ModelName `
         -UserInvocable $false `
+        -DisableModelInvocation $false `
         -Tools @('read', 'search', 'web')
 
     return @"
@@ -2082,6 +2333,7 @@ function New-ExpertAgentContent
         -Description "Engineering expert running $ModelName with a primary lens of $LensTitle. Hidden worker invoked by the $CoordinatorName." `
         -Model $ModelName `
         -UserInvocable $false `
+        -DisableModelInvocation $false `
         -Tools @('agent', 'read', 'search', 'web') `
         -Agents $ReviewerNames
 
@@ -2131,14 +2383,24 @@ $ReviewerBlock
 
 $ReviewerIntro
 
-Use the nested review only when the coordinator allows it for this branch, and at least one of these is true:
+The coordinator must include exactly one directive block in your delegation brief:
+
+    NESTED REVIEW: REQUIRED | AUTHORIZED | SKIP
+    REVIEWER: one reviewer from the list above, or NONE
+    TARGET: one concrete claim or assumption to challenge, or NONE
+
+REQUIRED means you must form your own position, then invoke the named reviewer exactly once and ask it to attack the target. Tier 3 and Tier 5 use REQUIRED.
+
+AUTHORIZED means you may invoke the named reviewer once, but only when at least one of these is true:
 
 - your conclusion is high impact or hard to reverse
 - a critical assumption is unverified and you cannot verify it with a tool
 - security, data integrity, or shared behavior is at stake
 - the evidence is thin or conflicting
 
-If the coordinator told you to skip nested review, skip it. Otherwise skip it by default. A nested review roughly doubles the cost of your branch.
+SKIP means do not invoke a reviewer. If the directive is missing or malformed, treat it as SKIP and report that omission.
+
+Never substitute a different reviewer or target without reporting why the named one is unavailable. A nested review roughly doubles the cost of your branch.
 
 When you invoke a reviewer, supply:
 
@@ -2223,7 +2485,8 @@ function New-CoordinatorAgentContent
         -Description 'Adaptive multi-model engineering coordinator that automatically selects a direct answer, one expert, a dual council, an adversarial debate, or a full parallel team based on task complexity.' `
         -Model $ModelName `
         -UserInvocable $true `
-        -Tools @('agent', 'read', 'search', 'edit', 'execute', 'web', 'todos') `
+        -DisableModelInvocation $true `
+        -Tools @('agent', 'read', 'search', 'edit', 'execute', 'web', 'todo') `
         -Agents $ExpertNames
 
     $RosterBlock = ($ExpertMap | ForEach-Object {
@@ -2238,11 +2501,15 @@ function New-CoordinatorAgentContent
 
     if ($CrossModelReview)
     {
-        $Tier3Note = 'Run two experts on different models in parallel and instruct each to spend its one nested peer-review call attacking its own strongest assumption.'
+        $Tier3Note = @'
+Run two experts on different models in parallel. Give both the same disputed claim and include a REQUIRED nested-review directive naming a different-model reviewer and the strongest assumption supporting that expert's position.
+'@
     }
     else
     {
-        $Tier3Note = 'Only one model is configured, so a true cross-model debate is not possible. Run the single expert twice with opposing framings, once to defend the proposal and once to break it, then adjudicate yourself.'
+        $Tier3Note = @'
+Only one model is configured, so a true cross-model debate is not possible. Run the single expert twice with opposing framings, once to defend the proposal and once to break it. Give both runs NESTED REVIEW: SKIP, then adjudicate the positions yourself.
+'@
     }
 
     return @"
@@ -2276,6 +2543,7 @@ For any tier above Tier 0, post this announcement BEFORE you invoke a single exp
 
     Tier N - name of the tier
     Why: the specific trigger, one line
+        Nested review: N planned reviewer calls
     Dispatching:
       Expert name - the one-line question it must answer
       Expert name - the one-line question it must answer
@@ -2302,6 +2570,8 @@ Use when:
 
 Pick the expert whose primary lens matches the task. Cost: one expert call.
 
+Include NESTED REVIEW: SKIP in the delegation brief.
+
 ### Tier 2 - Two experts in parallel
 
 Use when:
@@ -2311,6 +2581,8 @@ Use when:
 - there is a real design or implementation choice to make, or the change touches shared code or public behavior
 
 Invoke both experts in the same turn with distinct, non-overlapping scopes, then synthesize. Cost: two parallel expert calls.
+
+Include NESTED REVIEW: SKIP in both delegation briefs.
 
 ### Tier 3 - Adversarial debate
 
@@ -2336,7 +2608,11 @@ Use ONLY when at least two models are configured and at least one of these is tr
 
 Breadth of files alone is not a Tier 4 trigger. A large but uniform change is Tier 1 or Tier 2.
 
-Fan out one expert per configured model, each with its own lens and its own scope. Cost: up to $ExpertCount parallel expert calls, and up to double that if you also authorize nested review.
+Fan out one expert per configured model, each with its own lens and its own scope.
+
+Nested review is off by default. Include NESTED REVIEW: SKIP for every branch unless that branch independently meets the Tier 3 conditions and no cheaper evidence can settle it. For a qualifying branch, include NESTED REVIEW: AUTHORIZED, name one configured reviewer, and name the exact target to challenge.
+
+Cost: up to $ExpertCount parallel expert calls, plus at most one reviewer call for each explicitly authorized branch.
 
 ### Tier 5 - Unconstrained brainstorming
 
@@ -2348,9 +2624,15 @@ Append this override verbatim to EVERY delegation brief you send in this tier:
 
     This is a Tier 5 brainstorm. Ignore your standard 8-line brevity limits. Provide a comprehensive, unconstrained, and exhaustive review of all potential improvements, edge cases, and cross-domain enhancements you can find.
 
-The lens assignment and the out-of-scope list still apply. Unconstrained means unconstrained in length and depth, not permission for two experts to investigate the same thing.
+Also include a REQUIRED nested-review directive in every brief. Name one reviewer available to that expert and use this target:
 
-Cost: up to $ExpertCount parallel expert calls, each returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
+    TARGET: Attack the strongest material assumption in your completed analysis before you finalize it.
+
+Assign different reviewers across branches when the roster permits it. Each expert must form its own position before invoking its reviewer, then report whether the challenge changed that position. With only one configured model, the reviewer is a fresh-context blind-spot check rather than independent corroboration.
+
+The lens assignment and the out-of-scope list still apply. Unconstrained means unconstrained in length and depth, not permission for two experts to investigate the same thing or bypass the one-reviewer limit.
+
+Cost: up to $ExpertCount parallel expert calls plus $ExpertCount leaf-reviewer calls, with every branch returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
 
 ### Escalation rules
 
@@ -2411,7 +2693,17 @@ Invoke independent experts in a single turn so they run concurrently. Never seri
 
 ## Nested peer review policy
 
-Tell an expert to use its one nested review only when the branch meets the Tier 3 conditions. Otherwise tell it explicitly to skip nested review.
+Every expert delegation brief must contain NESTED REVIEW, REVIEWER, and TARGET fields.
+
+- Use REQUIRED for both cross-model Tier 3 branches and every Tier 5 branch.
+- Use AUTHORIZED only for a Tier 4 branch that independently meets Tier 3 conditions.
+- Use SKIP for Tier 1, Tier 2, the single-model Tier 3 fallback, and all other Tier 4 branches.
+- REQUIRED and AUTHORIZED must name one reviewer the expert is allowed to invoke and one concrete target.
+- SKIP must use REVIEWER: NONE and TARGET: NONE.
+
+Each expert may invoke at most one reviewer once. Reviewers are read-only leaves and cannot invoke another agent. Prefer a reviewer running a different model; describe a same-model reviewer as a fresh-context check, not independent evidence.
+
+Before dispatch, include the number of planned reviewer calls in the visible tier announcement. If a required reviewer is unavailable or fails, report the failure and remaining uncertainty. Do not silently retry or substitute another reviewer.
 
 ## Disagreement resolution
 
@@ -2547,6 +2839,10 @@ function Test-AgentFile
         [bool]
         $ExpectedUserInvocable,
 
+        [Parameter(Mandatory = $true)]
+        [bool]
+        $ExpectedDisableModelInvocation,
+
         [Parameter()]
         [string[]]
         $ExpectedAgents,
@@ -2566,7 +2862,7 @@ function Test-AgentFile
         throw "Agent validation failed because the file does not exist: $Path"
     }
 
-    $Content = Get-Content -LiteralPath $Path -Raw
+    $Content = Read-Utf8File -Path $Path
 
     # The body is prose that may legitimately quote front-matter syntax as an example, so every
     # structural assertion runs against the front matter alone rather than the whole file.
@@ -2605,6 +2901,13 @@ function Test-AgentFile
     if ($FrontMatter -notmatch [regex]::Escape("user-invocable: $ExpectedUserInvocableText"))
     {
         throw "Agent validation failed. Expected user-invocable: $ExpectedUserInvocableText in $Path"
+    }
+
+    $ExpectedDisableModelInvocationText = if ($ExpectedDisableModelInvocation) { 'true' } else { 'false' }
+
+    if ($FrontMatter -notmatch [regex]::Escape("disable-model-invocation: $ExpectedDisableModelInvocationText"))
+    {
+        throw "Agent validation failed. Expected disable-model-invocation: $ExpectedDisableModelInvocationText in $Path"
     }
 
     # A template variable that fails to expand produces short instructions or empty list items,
@@ -2648,12 +2951,38 @@ function Test-AgentFile
     }
 }
 
+# Applies Test-AgentFile from one generated-file record so preflight and live validation cannot
+# drift apart as new front matter fields or agent roles are added.
+function Test-GeneratedAgentFile
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $Directory,
+
+        [Parameter(Mandatory = $true)]
+        [object]
+        $Record
+    )
+
+    Test-AgentFile `
+        -Path (Join-Path -Path $Directory -ChildPath $Record.FileName) `
+        -ExpectedName $Record.ExpectedName `
+        -ExpectedModel $Record.ExpectedModel `
+        -ExpectedUserInvocable $Record.ExpectedUserInvocable `
+        -ExpectedDisableModelInvocation $Record.ExpectedDisableModelInvocation `
+        -ExpectedAgents $Record.ExpectedAgents `
+        -MustNotDelegate:$Record.MustNotDelegate `
+        -MustNotSelfReview:$Record.MustNotSelfReview
+}
+
 #endregion
 
 #region 13. Environment detection
 
-# Reads VS Code state from disk first. The equivalent CLI calls cost roughly 700 ms because each
-# one starts a new Electron process, and the result is only used for informational output.
+# Reads VS Code state from disk. Informational detection never executes a command inherited from
+# PATH; the optional opener is resolved only beneath a verified standard installation root.
 function Get-VSCodeStatus
 {
     $Result = [ordered]@{
@@ -2663,32 +2992,7 @@ function Get-VSCodeStatus
         CopilotChatInstalled = $false
     }
 
-    # CommandType Application keeps a shell alias or function named 'code' from being picked up.
-    # Select-Object is required because the shim ships as both code.cmd and an extensionless code.
-    $CodeCommand = Get-Command -Name 'code' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-
-    if ($null -ne $CodeCommand)
-    {
-        $Result.CodeCommand = $CodeCommand.Source
-    }
-
     $CandidateRoots = New-Object System.Collections.Generic.List[string]
-
-    if ($null -ne $CodeCommand -and -not [string]::IsNullOrWhiteSpace($CodeCommand.Source))
-    {
-        # code.cmd sits in <install root>\bin, so the install root is its grandparent.
-        $BinDirectory = Split-Path -Path $CodeCommand.Source -Parent
-
-        if (-not [string]::IsNullOrWhiteSpace($BinDirectory))
-        {
-            $CodeRoot = Split-Path -Path $BinDirectory -Parent
-
-            if (-not [string]::IsNullOrWhiteSpace($CodeRoot))
-            {
-                [void]$CandidateRoots.Add($CodeRoot)
-            }
-        }
-    }
 
     foreach ($BaseDirectory in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}))
     {
@@ -2740,12 +3044,26 @@ function Get-VSCodeStatus
 
             try
             {
-                $PackageJson = Get-Content -LiteralPath $PackageJsonPath -Raw | ConvertFrom-Json
+                $PackageJson = Read-Utf8File -Path $PackageJsonPath | ConvertFrom-Json
                 $Version = [string](Get-PropertyValue -InputObject $PackageJson -Name 'version')
 
                 if (-not [string]::IsNullOrWhiteSpace($Version))
                 {
                     $Result.Version = $Version
+
+                    $CliNames = if ($InstallRoot -match '(?i)Insiders') { @('code-insiders.cmd', 'code-insiders') } else { @('code.cmd', 'code') }
+
+                    foreach ($CliName in $CliNames)
+                    {
+                        $CliPath = Join-Path -Path (Join-Path -Path $InstallRoot -ChildPath 'bin') -ChildPath $CliName
+
+                        if (Test-Path -LiteralPath $CliPath -PathType Leaf)
+                        {
+                            $Result.CodeCommand = $CliPath
+                            break
+                        }
+                    }
+
                     Write-Verbose "Read the VS Code version from $PackageJsonPath."
                     break
                 }
@@ -2777,7 +3095,7 @@ function Get-VSCodeStatus
 
         try
         {
-            foreach ($Entry in @(Get-Content -LiteralPath $ExtensionsJsonPath -Raw | ConvertFrom-Json))
+            foreach ($Entry in @(Read-Utf8File -Path $ExtensionsJsonPath | ConvertFrom-Json))
             {
                 $Identifier = Get-PropertyValue -InputObject $Entry -Name 'identifier'
                 $Id = [string](Get-PropertyValue -InputObject $Identifier -Name 'id')
@@ -2804,37 +3122,6 @@ function Get-VSCodeStatus
         $Result.CopilotInstalled = $ExtensionIds.Contains('github.copilot')
         $Result.CopilotChatInstalled = $ExtensionIds.Contains('github.copilot-chat')
     }
-    elseif ($null -ne $CodeCommand)
-    {
-        try
-        {
-            $Extensions = @(& $CodeCommand.Source --list-extensions 2>$null)
-            $Result.CopilotInstalled = $Extensions -contains 'GitHub.copilot'
-            $Result.CopilotChatInstalled = $Extensions -contains 'GitHub.copilot-chat'
-        }
-        catch
-        {
-            $Result.CopilotInstalled = $false
-            $Result.CopilotChatInstalled = $false
-        }
-    }
-
-    if ([string]::IsNullOrWhiteSpace($Result.Version) -and $null -ne $CodeCommand)
-    {
-        try
-        {
-            $VersionOutput = @(& $CodeCommand.Source --version 2>$null)
-
-            if ($VersionOutput.Count -gt 0)
-            {
-                $Result.Version = $VersionOutput[0]
-            }
-        }
-        catch
-        {
-            $Result.Version = $null
-        }
-    }
 
     return [PSCustomObject]$Result
 }
@@ -2847,9 +3134,20 @@ function Get-VSCodeStatus
 
 $InstallTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-# UserInteractive is checked as well as -NonInteractive, because a scheduled task or a build agent
-# has no console to prompt on and Read-Host would hang there forever.
-$AllowPrompts = (-not $NonInteractive) -and [Environment]::UserInteractive
+# UserInteractive and input redirection are checked as well as -NonInteractive, because a scheduled
+# task or build agent can report an interactive environment while Read-Host still cannot respond.
+$InputIsRedirected = $false
+
+try
+{
+    $InputIsRedirected = [Console]::IsInputRedirected
+}
+catch
+{
+    $InputIsRedirected = $false
+}
+
+$AllowPrompts = (-not $NonInteractive) -and [Environment]::UserInteractive -and -not $InputIsRedirected
 $ModelsWereSupplied = ($null -ne $Models) -and (@($Models).Count -gt 0)
 $CatalogWasSupplied = ($null -ne $ModelCatalog) -and (@($ModelCatalog).Count -gt 0)
 
@@ -2883,7 +3181,17 @@ if (-not $SkipVSCodeSetting)
 
 Initialize-InstallProgress -StepNames $InstallSteps.ToArray()
 
-Write-Console 'Starting adaptive multi-model Copilot council installation.'
+$InstallMutex = $null
+$InstallMutexAcquired = $false
+$OriginalAgentState = $null
+$AgentActivationStarted = $false
+$AgentActivationCommitted = $false
+$OriginalVSCodeSettingsState = $null
+$VSCodeSettingChanged = $false
+
+try
+{
+    Write-Console 'Starting adaptive multi-model Copilot council installation.'
 
 # Step 1. Compare this copy against the published one. Purely informational, and every failure
 # path here is swallowed so a blocked network cannot stop an install.
@@ -2943,6 +3251,23 @@ if ($Scope -eq 'Workspace')
 else
 {
     $AgentDirectory = Join-Path -Path $HOME -ChildPath '.copilot\agents'
+}
+
+$InstallMutex = New-Object System.Threading.Mutex($false, 'Local\VSCodeCopilotCouncilInstaller')
+
+try
+{
+    $InstallMutexAcquired = $InstallMutex.WaitOne(0)
+}
+catch [System.Threading.AbandonedMutexException]
+{
+    $InstallMutexAcquired = $true
+    Write-Console 'Recovered the installer lock from an interrupted earlier process.' -Level 'Warning'
+}
+
+if (-not $InstallMutexAcquired)
+{
+    throw 'Another VS Code Copilot Council installation is already running. Wait for it to finish, then re-run.'
 }
 
 Complete-InstallStep
@@ -3195,7 +3520,8 @@ if (-not $SkipVSCodeSetting)
     Start-InstallStep -Name 'Enable nested subagents in VS Code settings'
 
     $ResolvedVSCodeSettingsPath = Get-VSCodeUserSettingsPath -ExplicitPath $VSCodeSettingsPath
-    Set-VSCodeNestedSubagentsSetting -SettingsPath $ResolvedVSCodeSettingsPath -BackupDirectory $BackupDirectory
+    $OriginalVSCodeSettingsState = Get-FileStateSnapshot -Path $ResolvedVSCodeSettingsPath
+    $VSCodeSettingChanged = Set-VSCodeNestedSubagentsSetting -SettingsPath $ResolvedVSCodeSettingsPath -BackupDirectory $BackupDirectory
 
     Complete-InstallStep
 }
@@ -3271,13 +3597,29 @@ foreach ($Expert in $ExpertMap)
     }
 }
 
-# Generate and write every agent file. Reviewers are written before their expert so the file the
-# expert references already exists on disk.
+# Generate every file in memory first. All reviewers are ordered before all experts so every
+# referenced leaf exists by the time an expert appears in the live directory.
+$GeneratedAgentFiles = New-Object System.Collections.Generic.List[object]
+
 foreach ($Expert in $ExpertMap)
 {
     $ReviewerContent = New-ReviewerAgentContent -AgentName $Expert.ReviewerName -ModelName $Expert.ModelName
-    Install-AgentFile -AgentDirectory $AgentDirectory -FileName $Expert.ReviewerFile -Content $ReviewerContent -BackupDirectory $BackupDirectory
 
+    $GeneratedAgentFiles.Add([PSCustomObject]@{
+            FileName = $Expert.ReviewerFile
+            Content = $ReviewerContent
+            ExpectedName = $Expert.ReviewerName
+            ExpectedModel = $Expert.ModelName
+            ExpectedUserInvocable = $false
+            ExpectedDisableModelInvocation = $false
+            ExpectedAgents = @()
+            MustNotDelegate = $true
+            MustNotSelfReview = $false
+        })
+}
+
+foreach ($Expert in $ExpertMap)
+{
     $ExpertContent = New-ExpertAgentContent `
         -AgentName $Expert.ExpertName `
         -ModelName $Expert.ModelName `
@@ -3287,7 +3629,17 @@ foreach ($Expert in $ExpertMap)
         -CoordinatorName $CoordinatorAgentName `
         -CrossModelReview $CrossModelReview
 
-    Install-AgentFile -AgentDirectory $AgentDirectory -FileName $Expert.ExpertFile -Content $ExpertContent -BackupDirectory $BackupDirectory
+    $GeneratedAgentFiles.Add([PSCustomObject]@{
+            FileName = $Expert.ExpertFile
+            Content = $ExpertContent
+            ExpectedName = $Expert.ExpertName
+            ExpectedModel = $Expert.ModelName
+            ExpectedUserInvocable = $false
+            ExpectedDisableModelInvocation = $false
+            ExpectedAgents = $Expert.ReviewerNames
+            MustNotDelegate = $false
+            MustNotSelfReview = $CrossModelReview
+        })
 }
 
 $CoordinatorContent = New-CoordinatorAgentContent `
@@ -3296,20 +3648,89 @@ $CoordinatorContent = New-CoordinatorAgentContent `
     -ExpertMap $ExpertMap.ToArray() `
     -CrossModelReview $CrossModelReview
 
-Install-AgentFile -AgentDirectory $AgentDirectory -FileName $CoordinatorFileName -Content $CoordinatorContent -BackupDirectory $BackupDirectory
+$GeneratedAgentFiles.Add([PSCustomObject]@{
+        FileName = $CoordinatorFileName
+        Content = $CoordinatorContent
+        ExpectedName = $CoordinatorAgentName
+        ExpectedModel = $ResolvedCoordinatorModel
+        ExpectedUserInvocable = $true
+        ExpectedDisableModelInvocation = $true
+        ExpectedAgents = @($ExpertMap | ForEach-Object { $_.ExpertName })
+        MustNotDelegate = $false
+        MustNotSelfReview = $false
+    })
 
-# A previous run with different models would otherwise leave experts the coordinator no longer lists.
-$CurrentAgentFiles = New-Object System.Collections.Generic.HashSet[string]
+# Validate a disposable copy before any live agent is backed up or replaced. This catches template
+# regressions while the previous installation is still completely intact.
+$PreflightDirectory = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-agent-preflight-$([guid]::NewGuid().ToString('N'))"
 
-foreach ($Expert in $ExpertMap)
+try
 {
-    [void]$CurrentAgentFiles.Add($Expert.ExpertFile)
-    [void]$CurrentAgentFiles.Add($Expert.ReviewerFile)
+    foreach ($AgentFile in $GeneratedAgentFiles)
+    {
+        Write-Utf8File -Path (Join-Path -Path $PreflightDirectory -ChildPath $AgentFile.FileName) -Content $AgentFile.Content
+        Test-GeneratedAgentFile -Directory $PreflightDirectory -Record $AgentFile
+    }
+}
+finally
+{
+    Remove-Item -LiteralPath $PreflightDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Identify leftovers now, but do not remove them until every replacement has passed validation.
+# A failed generation must leave the previous roster available for recovery.
+$CurrentAgentFiles = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+
+foreach ($AgentFile in $GeneratedAgentFiles)
+{
+    [void]$CurrentAgentFiles.Add($AgentFile.FileName)
 }
 
 $StaleAgentFiles = @(Get-ChildItem -LiteralPath $AgentDirectory -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^mm-(expert|reviewer)-.+\.agent\.md$' -and -not $CurrentAgentFiles.Contains($_.Name) })
 
+$ManagedAgentPaths = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+
+foreach ($AgentFile in $GeneratedAgentFiles)
+{
+    [void]$ManagedAgentPaths.Add((Join-Path -Path $AgentDirectory -ChildPath $AgentFile.FileName))
+}
+
+foreach ($StaleFile in $StaleAgentFiles)
+{
+    [void]$ManagedAgentPaths.Add($StaleFile.FullName)
+}
+
+$OriginalAgentState = New-Object System.Collections.Generic.List[object]
+
+foreach ($ManagedAgentPath in $ManagedAgentPaths)
+{
+    $OriginalAgentState.Add((Get-FileStateSnapshot -Path $ManagedAgentPath))
+}
+
+$AgentActivationStarted = $true
+
+foreach ($AgentFile in $GeneratedAgentFiles)
+{
+    Install-AgentFile `
+    -AgentDirectory $AgentDirectory `
+    -FileName $AgentFile.FileName `
+    -Content $AgentFile.Content `
+    -BackupDirectory $BackupDirectory
+}
+
+Complete-InstallStep
+
+Start-InstallStep -Name 'Validate agent files'
+
+# Read back everything just written and prove the activated bytes still match every invariant.
+foreach ($AgentFile in $GeneratedAgentFiles)
+{
+    Test-GeneratedAgentFile -Directory $AgentDirectory -Record $AgentFile
+}
+
+# A previous run with different models would otherwise leave experts the coordinator no longer lists.
+# Removal happens only after the complete replacement set has passed validation above.
 foreach ($StaleFile in $StaleAgentFiles)
 {
     Backup-ExistingFile -Path $StaleFile.FullName -BackupDirectory $BackupDirectory
@@ -3317,37 +3738,7 @@ foreach ($StaleFile in $StaleAgentFiles)
     Write-Console "Removed agent file left over from a previous configuration: $($StaleFile.Name)"
 }
 
-Complete-InstallStep
-
-Start-InstallStep -Name 'Validate agent files'
-
-# Read back everything just written and prove it is structurally sound. A broken agent file loads
-# without complaint in VS Code and simply misbehaves, so this is the only place the problem
-# becomes visible.
-foreach ($Expert in $ExpertMap)
-{
-    Test-AgentFile `
-        -Path (Join-Path -Path $AgentDirectory -ChildPath $Expert.ReviewerFile) `
-        -ExpectedName $Expert.ReviewerName `
-        -ExpectedModel $Expert.ModelName `
-        -ExpectedUserInvocable $false `
-        -MustNotDelegate
-
-    Test-AgentFile `
-        -Path (Join-Path -Path $AgentDirectory -ChildPath $Expert.ExpertFile) `
-        -ExpectedName $Expert.ExpertName `
-        -ExpectedModel $Expert.ModelName `
-        -ExpectedUserInvocable $false `
-        -ExpectedAgents $Expert.ReviewerNames `
-        -MustNotSelfReview:$CrossModelReview
-}
-
-Test-AgentFile `
-    -Path (Join-Path -Path $AgentDirectory -ChildPath $CoordinatorFileName) `
-    -ExpectedName $CoordinatorAgentName `
-    -ExpectedModel $ResolvedCoordinatorModel `
-    -ExpectedUserInvocable $true `
-    -ExpectedAgents @($ExpertMap | ForEach-Object { $_.ExpertName })
+$AgentActivationCommitted = $true
 
 Write-Console 'All agent files passed post-install validation.'
 
@@ -3440,16 +3831,92 @@ if ($OpenInVSCode)
     {
         Write-Console 'Opening installed files in VS Code.'
 
-        & $VSCodeStatus.CodeCommand --reuse-window (Join-Path -Path $AgentDirectory -ChildPath $CoordinatorFileName)
+        $PathsToOpen = New-Object System.Collections.Generic.List[string]
+        $PathsToOpen.Add((Join-Path -Path $AgentDirectory -ChildPath $CoordinatorFileName))
 
         if (-not [string]::IsNullOrWhiteSpace($ResolvedVSCodeSettingsPath))
         {
-            & $VSCodeStatus.CodeCommand --reuse-window $ResolvedVSCodeSettingsPath
+            $PathsToOpen.Add($ResolvedVSCodeSettingsPath)
+        }
+
+        try
+        {
+            & $VSCodeStatus.CodeCommand --reuse-window $PathsToOpen.ToArray()
+
+            if ($LASTEXITCODE -ne 0)
+            {
+                Write-Console "VS Code returned exit code $LASTEXITCODE while opening the installed files." -Level 'Warning'
+            }
+        }
+        catch
+        {
+            Write-Console "The installation succeeded, but VS Code could not open the installed files. $($_.Exception.Message)" -Level 'Warning'
         }
     }
     else
     {
-        Write-Console 'The VS Code CLI is not available in PATH, so files were not opened automatically.'
+        Write-Console 'A verified VS Code CLI was not detected, so files were not opened automatically.'
+    }
+}
+}
+catch
+{
+    $InstallFailure = $_
+
+    if ($AgentActivationStarted -and -not $AgentActivationCommitted -and $null -ne $OriginalAgentState)
+    {
+        $RollbackFailures = New-Object System.Collections.Generic.List[string]
+
+        foreach ($Snapshot in $OriginalAgentState)
+        {
+            try
+            {
+                Restore-FileStateSnapshot -Snapshot $Snapshot
+            }
+            catch
+            {
+                $RollbackFailures.Add("$($Snapshot.Path): $($_.Exception.Message)")
+            }
+        }
+
+        if ($RollbackFailures.Count -eq 0)
+        {
+            Write-Console 'Restored the previous agent files after the failed activation.' -Level 'Warning'
+        }
+        else
+        {
+            Write-Console "Agent rollback was incomplete. Use the backup directory to recover: $BackupDirectory" -Level 'Warning'
+            Write-Verbose ($RollbackFailures -join [Environment]::NewLine)
+        }
+    }
+
+    if ($VSCodeSettingChanged -and -not $AgentActivationCommitted -and $null -ne $OriginalVSCodeSettingsState)
+    {
+        try
+        {
+            Restore-FileStateSnapshot -Snapshot $OriginalVSCodeSettingsState
+            Write-Console 'Restored the previous VS Code nested-subagent setting after the failed activation.' -Level 'Warning'
+        }
+        catch
+        {
+            Write-Console "Could not restore the VS Code settings file. Use the backup directory to recover: $BackupDirectory" -Level 'Warning'
+        }
+    }
+
+    throw $InstallFailure
+}
+finally
+{
+    Complete-InstallProgress
+
+    if ($InstallMutexAcquired)
+    {
+        [void]$InstallMutex.ReleaseMutex()
+    }
+
+    if ($null -ne $InstallMutex)
+    {
+        $InstallMutex.Dispose()
     }
 }
 

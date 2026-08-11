@@ -219,6 +219,23 @@ jobs:
           Remove-Item -LiteralPath $workspace -Recurse -Force
           Write-Host "Validation passed. $($agentFiles.Count) agent files generated and checked."
 
+      - name: Run Pester on PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          Invoke-Pester -Path './tests' -CI -Output Detailed
+
+      - name: Run Pester on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          Invoke-Pester -Path './tests' -CI -Output Detailed
+
       - name: Build release assets
         id: package
         shell: pwsh

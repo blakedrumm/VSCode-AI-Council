@@ -5,6 +5,58 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.0
+
+### Added
+
+- **Required Tier 5 peer review.** Every Tier 5 expert now forms its own position, then invokes one
+  configured leaf reviewer to attack the strongest material assumption before finalizing. A
+  five-model Tier 5 run therefore has up to five expert calls and five reviewer calls.
+- **Explicit nested-review directives.** Every expert brief now carries `REQUIRED`, `AUTHORIZED`, or
+  `SKIP`, plus a named reviewer and target where applicable. Tier 3 and Tier 5 require review, Tier 4
+  can authorize it per qualifying branch, and Tiers 1 and 2 skip it.
+- **Transactional activation.** The complete generated roster is preflighted before live agent files
+  are touched. The installer snapshots files it owns and the original VS Code setting, then restores both
+  when activation fails before validation completes.
+- **Behavioral regression suite.** Twenty Pester checks now cover generated invocation flags, Tier 5
+  policy, model-name boundaries, root-aware JSONC mutation, strict UTF-8 handling, and a real
+  multi-model workspace install. CI and release validation run them on PowerShell 7 and Windows
+  PowerShell 5.1.
+
+### Changed
+
+- Hidden experts and reviewers now use `user-invocable: false` with
+  `disable-model-invocation: false`, while the visible coordinator remains protected from subagent
+  invocation. Post-install validation asserts both values for every role.
+- Stale agents are removed only after the replacement roster passes validation. A process-wide mutex
+  rejects overlapping installer runs.
+- Agent and settings reads now use strict UTF-8 decoding on both PowerShell editions. Invalid bytes
+  fail before backup or mutation instead of being silently replaced.
+- The settings editor now locates only root properties, rejects duplicate root keys, leaves nested
+  lookalikes untouched, avoids no-op rewrites, and detects concurrent changes before committing.
+- The update check now reads only GitHub release metadata. The raw-script fallback was removed, so the
+  check no longer downloads the published installer body and has one bounded network attempt.
+- VS Code detection no longer executes a `code` command inherited from `PATH`. The optional opener is
+  resolved beneath a verified standard installation and failures are reported as warnings after a
+  successful install.
+- Generated coordinators use the canonical `todo` tool name. VS Code's legacy `todos` alias remains
+  compatible with older generated files.
+
+### Fixed
+
+- **Workers could be excluded from subagent invocation.** The front-matter builder previously emitted
+  `disable-model-invocation: true` for every role, contradicting VS Code's documented subagent flag and
+  the council's explicit allowlists.
+- Uppercase `C` in the model picker now opens custom-model entry as advertised.
+- Malformed JSON in the current VS Code model-cache key now falls through to the legacy key, and each
+  prepared SQLite statement is finalized independently.
+- Duplicate catalog entries no longer produce duplicate recommendations, and oversized numeric model
+  versions fail closed instead of overflowing.
+- Model names are now length-bounded and reject leading or trailing whitespace, Unicode format
+  controls, and malformed surrogate code points.
+- Atomic replacement failure no longer falls back to truncating a live target. The installer preserves
+  the old file or retains an explicit recovery copy when filesystem state is uncertain.
+
 ## 5.6.1
 
 No change to the installer's behavior. This is the first release published by the release workflow

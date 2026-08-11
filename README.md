@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.6.1-blue" alt="Version 5.6.1">
+  <img src="https://img.shields.io/badge/version-5.7.0-blue" alt="Version 5.7.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -49,13 +49,15 @@ The installer prompts for the models to use, writes the agent files, and tells y
 
 | Agent | Visible | Tools | Role |
 |---|---|---|---|
-| Multi-Model Engineering Council | Yes | agent, read, search, edit, execute, web, todos | Chooses the strategy, delegates, owns file edits, synthesizes the answer |
+| Multi-Model Engineering Council | Yes | agent, read, search, edit, execute, web, todo | Chooses the strategy, delegates, owns file edits, synthesizes the answer |
 | `<Model>` Expert | No | agent, read, search, web | One per configured model, each with its own review lens |
 | `<Model>` Reviewer | No | read, search, web | Leaf peer reviewer with no subagent tool |
 
 Reviewers cannot invoke subagents, which caps nesting at two levels. A recursion like GPT to Claude to GPT to Claude is structurally impossible rather than merely discouraged.
 
-Each expert may consult exactly one reviewer, exactly once, and never its own. An expert running Claude can only be challenged by a reviewer running something other than Claude.
+Workers use `user-invocable: false` and `disable-model-invocation: false`: they stay out of the agent picker while remaining available through the coordinator's explicit allowlist. The coordinator cannot itself be recruited as a subagent.
+
+Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 and Tier 5 require that review; Tier 4 authorizes it only for a branch with a material unresolved claim. An expert running Claude can only be challenged by a reviewer running something other than Claude.
 
 ## The six tiers
 
@@ -67,8 +69,8 @@ The coordinator classifies each request once and picks the cheapest strategy tha
 | 1 | One expert | 1 call | The task sits inside a single lens with a small blast radius |
 | 2 | Two experts in parallel | 2 calls | The task spans two lenses, or touches shared code and public behavior |
 | 3 | Adversarial debate | ~4 calls | You asked for a debate, or a disagreement survived that no tool could settle |
-| 4 | Full parallel team | up to 5 calls | You asked for the full team, or the work spans genuinely independent subsystems |
-| 5 | Unconstrained brainstorm | up to 5 long calls | You explicitly said brainstorm, deep review, or unconstrained. Every expert is told to drop its brevity limit and answer exhaustively |
+| 4 | Full parallel team | up to 5 expert calls, plus selected reviews | You asked for the full team, or the work spans genuinely independent subsystems |
+| 5 | Unconstrained brainstorm | up to 10 long calls | You explicitly said brainstorm, deep review, or unconstrained. Every expert answers exhaustively, then one leaf reviewer attacks its strongest material assumption |
 
 Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, from spending an expert call on something a single tool call can verify, and from selecting Tier 5 on its own initiative.
 
@@ -135,7 +137,7 @@ If you would rather a run finish before your next message is processed, choose *
 
 On startup the installer compares its own version against the published one and prints a link if a newer version exists.
 
-It reads a version string and nothing else. It never downloads or executes remote code, so upgrading stays a deliberate act you perform after reading the diff. A failed or blocked check never stops the installation, and `-SkipUpdateCheck` turns it off entirely.
+It reads the latest release tag from GitHub's release metadata. It never downloads or executes release assets or scripts, so upgrading stays a deliberate act you perform after reading the diff. A failed or blocked check never stops the installation, and `-SkipUpdateCheck` turns it off entirely.
 
 ## Parameters
 
@@ -180,6 +182,10 @@ That setting is global. It enables nested subagents for every agent you use, not
 
 The installer does **not** enable global tool auto-approval, and does **not** enable unrestricted recursive agents.
 
+Before activating a roster, the installer generates and validates the complete agent set in a disposable directory. Live agent files are changed only after preflight succeeds. A named mutex prevents concurrent installers from interleaving changes, and a failed activation restores the previous agent files and the original nested-subagent setting.
+
+The repository's Pester suite runs the same behavioral checks on PowerShell 7 and Windows PowerShell 5.1, including non-ASCII model names, settings mutation, generated front matter, and Tier 5 review policy.
+
 ## Uninstall
 
 ```powershell
@@ -192,7 +198,7 @@ Then set `chat.subagents.allowInvocationsFromSubagents` back to `false` if you w
 
 ## Cost
 
-Tier 4 runs five frontier models in parallel, and a nested review can double a branch. That is precisely why the tier gating exists, and why the coordinator is instructed to start at the lowest tier that can answer correctly. In practice most requests cost zero or one expert call.
+Tier 4 runs up to five frontier models in parallel, and a selected nested review can double a branch. Tier 5 intentionally runs one reviewer behind every expert, so a five-model Tier 5 run can use ten model calls and return a large synthesis. That is precisely why the tier gating exists, and why the coordinator is instructed to start at the lowest tier that can answer correctly. In practice most requests cost zero or one expert call.
 
 Hover a subagent section in the chat response to see the AI credits it used.
 
