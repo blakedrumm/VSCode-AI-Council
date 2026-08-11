@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.2
+        5.7.3
 
     Compatible with:
         Windows PowerShell 5.1
@@ -302,7 +302,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.2'
+$ScriptVersion = '5.7.3'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -839,10 +839,19 @@ function Remove-ExpiredBackup
     # The folder name is a sortable timestamp, so newest-first is a plain descending name sort.
     $CurrentName = Split-Path -Path $CurrentBackupDirectory -Leaf
 
+    # This run's folder is filtered out below, so it has to be charged against the cap here or the
+    # installer would keep KeepCount plus one.
+    $KeepBesidesCurrent = $KeepCount
+
+    if (Test-Path -LiteralPath $CurrentBackupDirectory)
+    {
+        $KeepBesidesCurrent = [Math]::Max(0, $KeepCount - 1)
+    }
+
     $Expired = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^v5_\d{8}_\d{9}$' -and $_.Name -ne $CurrentName } |
             Sort-Object -Property 'Name' -Descending |
-            Select-Object -Skip $KeepCount)
+            Select-Object -Skip $KeepBesidesCurrent)
 
     $Removed = 0
 
@@ -1133,6 +1142,12 @@ function Get-CachedModelRecord
     $Database = [IntPtr]::Zero
     $Statement = [IntPtr]::Zero
 
+    # A torn copy can prepare, step, or parse badly without throwing. Those are read failures, not an
+    # empty cache, and only a failure verdict makes the caller retry with a fresh snapshot.
+    $OperationalFailure = $false
+    $SqliteRow = 100
+    $SqliteDone = 101
+
     try
     {
         Copy-Item -LiteralPath $StatePath -Destination $TempCopy -Force
@@ -1162,12 +1177,18 @@ function Get-CachedModelRecord
             {
                 if ([VSCodeCouncil.SqliteCacheV1]::Prepare($Database, [System.Text.Encoding]::UTF8.GetBytes("$Sql`0"), -1, [ref]$Statement, [IntPtr]::Zero) -ne 0)
                 {
+                    $OperationalFailure = $true
                     continue
                 }
 
-                $SqliteRow = 100
+                $StepResult = [VSCodeCouncil.SqliteCacheV1]::Step($Statement)
 
-                if ([VSCodeCouncil.SqliteCacheV1]::Step($Statement) -eq $SqliteRow)
+                if ($StepResult -ne $SqliteRow -and $StepResult -ne $SqliteDone)
+                {
+                    $OperationalFailure = $true
+                }
+
+                if ($StepResult -eq $SqliteRow)
                 {
                     # SQLite documents blob-then-bytes as the safe order; the reverse can force a type conversion.
                     $Blob = [VSCodeCouncil.SqliteCacheV1]::ColumnBlob($Statement, 0)
@@ -1193,6 +1214,7 @@ function Get-CachedModelRecord
                         catch
                         {
                             Write-Verbose "Skipping malformed JSON from VS Code model cache key in $StatePath. $($_.Exception.Message)"
+                            $OperationalFailure = $true
                             continue
                         }
 
@@ -1273,7 +1295,7 @@ function Get-CachedModelRecord
         Remove-Item -LiteralPath "$TempCopy-shm" -Force -ErrorAction SilentlyContinue
     }
 
-    return [PSCustomObject]@{ Succeeded = $true; Records = @() }
+    return [PSCustomObject]@{ Succeeded = (-not $OperationalFailure); Records = @() }
 }
 
 # Tries the stable VS Code state database first, then Insiders, and returns the first one that
@@ -2064,24 +2086,23 @@ function Get-RootJsonPropertyToken
                 }
 
                 $ObjectDepth++
-                continue
             }
             '}'
             {
                 $ObjectDepth--
-                continue
             }
             '['
             {
                 $ArrayDepth++
-                continue
             }
             ']'
             {
                 $ArrayDepth--
-                continue
             }
         }
+
+        # No continue above: inside a switch it would only leave the switch, not this loop. The
+        # structural tokens fall through to the quote test below, which rejects them anyway.
 
         if ($ObjectDepth -ne 1 -or $ArrayDepth -ne 0 -or -not $Token.Value.StartsWith('"'))
         {
@@ -2135,7 +2156,13 @@ function Set-VSCodeNestedSubagentsSetting
 
         [Parameter(Mandatory = $true)]
         [string]
-        $BackupDirectory
+        $BackupDirectory,
+
+        # Records what actually reached disk. A return value cannot do this, because the throw paths
+        # that rollback exists for never return one.
+        [Parameter(Mandatory = $false)]
+        [hashtable]
+        $WriteState
     )
 
     $SettingsDirectory = Split-Path -Path $SettingsPath -Parent
@@ -2146,7 +2173,11 @@ function Set-VSCodeNestedSubagentsSetting
     }
 
     $SettingsExisted = Test-Path -LiteralPath $SettingsPath
-    $Content = if ($SettingsExisted) { Read-Utf8File -Path $SettingsPath } else { '{}' }
+
+    # The raw text is kept apart from the parsed text, because an empty or whitespace-only file is
+    # treated as {} but still has to compare equal to itself in the pre-write concurrency check.
+    $OriginalContent = if ($SettingsExisted) { Read-Utf8File -Path $SettingsPath } else { '' }
+    $Content = $OriginalContent
 
     if ([string]::IsNullOrWhiteSpace($Content))
     {
@@ -2237,12 +2268,17 @@ function Set-VSCodeNestedSubagentsSetting
     {
         $CurrentContent = Read-Utf8File -Path $SettingsPath
 
-        if ($CurrentContent -cne $Content)
+        if ($CurrentContent -cne $OriginalContent)
         {
             throw "VS Code settings changed while the installer was preparing its update. Nothing was written: $SettingsPath"
         }
 
         Backup-ExistingFile -Path $SettingsPath -BackupDirectory $BackupDirectory
+    }
+
+    if ($null -ne $WriteState)
+    {
+        $WriteState['Attempted'] = $true
     }
 
     # PreserveLineEndings keeps the user's existing CRLF or LF style instead of rewriting the whole file.
@@ -2253,9 +2289,16 @@ function Set-VSCodeNestedSubagentsSetting
         Write-Console "Created VS Code settings file: $SettingsPath"
     }
 
+    $WrittenContent = Read-Utf8File -Path $SettingsPath
+
+    if ($null -ne $WriteState)
+    {
+        $WriteState['WrittenContent'] = $WrittenContent
+    }
+
     try
     {
-        $WrittenSettings = ConvertFrom-JsoncText -Text (Read-Utf8File -Path $SettingsPath)
+        $WrittenSettings = ConvertFrom-JsoncText -Text $WrittenContent
     }
     catch
     {
@@ -2473,10 +2516,12 @@ function New-ExpertAgentContent
     if ($CrossModelReview)
     {
         $ReviewerIntro = 'Each of these reviewers runs a different model than you do, so the critique is genuinely independent.'
+        $RequiredTierLine = 'Tier 3 and Tier 5 use REQUIRED.'
     }
     else
     {
         $ReviewerIntro = 'Only one model is configured, so this reviewer runs the same model with a fresh context. Treat it as a blind-spot check, not as an independent model.'
+        $RequiredTierLine = 'Tier 5 uses REQUIRED. The single-model Tier 3 fallback uses SKIP.'
     }
 
     return @"
@@ -2519,7 +2564,7 @@ The coordinator must include exactly one directive block in your delegation brie
     REVIEWER: one reviewer from the list above, or NONE
     TARGET: one concrete claim or assumption to challenge, or NONE
 
-REQUIRED means you must form your own position, then invoke the named reviewer exactly once and ask it to attack the target. Tier 3 and Tier 5 use REQUIRED.
+REQUIRED means you must form your own position, then invoke the named reviewer exactly once and ask it to attack the target. $RequiredTierLine
 
 AUTHORIZED means you may invoke the named reviewer once, but only when at least one of these is true:
 
@@ -2628,18 +2673,65 @@ function New-CoordinatorAgentContent
         }) -join "`n"
 
     $ExpertCount = $ExpertMap.Count
+    $Tier5ExpertCost = if ($ExpertCount -eq 1) { 'one expert call' } else { "up to $ExpertCount parallel expert calls" }
+    $Tier5ReviewerCost = if ($ExpertCount -eq 1) { 'one leaf-reviewer call' } else { "$ExpertCount leaf-reviewer calls" }
 
     if ($CrossModelReview)
     {
+        $Tier2Body = @'
+Use when:
+
+- the task spans two lenses, and
+- there is a real design or implementation choice to make, or the change touches shared code or public behavior
+
+Invoke both experts in the same turn with distinct, non-overlapping scopes, then synthesize. Cost: two parallel expert calls.
+
+Include NESTED REVIEW: SKIP in both delegation briefs.
+'@
+
         $Tier3Note = @'
 Run two experts on different models in parallel. Give both the same disputed claim and include a REQUIRED nested-review directive naming a different-model reviewer and the strongest assumption supporting that expert's position.
 '@
+
+        $Tier3Cost = 'Cost: two expert calls plus their nested reviews, so roughly four model invocations.'
+
+        $Tier4Body = @"
+Use ONLY when at least one of these is true:
+
+- the user explicitly asked for the full team or a complete review
+- the work spans several genuinely independent subsystems that need different lenses at once
+- a difficult bug has already survived a Tier 1 or Tier 2 attempt
+
+Breadth of files alone is not a Tier 4 trigger. A large but uniform change is Tier 1 or Tier 2.
+
+Fan out one expert per configured model, each with its own lens and its own scope.
+
+Nested review is off by default. Include NESTED REVIEW: SKIP for every branch unless that branch independently meets the Tier 3 conditions and no cheaper evidence can settle it. For a qualifying branch, include NESTED REVIEW: AUTHORIZED, name one configured reviewer, and name the exact target to challenge.
+
+Cost: up to $ExpertCount parallel expert calls, plus at most one reviewer call for each explicitly authorized branch.
+"@
+
+        $NestedReviewRequiredLine = 'Use REQUIRED for both cross-model Tier 3 branches and every Tier 5 branch.'
+        $NestedReviewSkipLine = 'Use SKIP for Tier 1, Tier 2, and all other Tier 4 branches.'
     }
     else
     {
+        $Tier2Body = @'
+Unavailable. Only one model is configured, so there is no second expert to run beside the first. Stay at Tier 1, and go to Tier 3 only when the task genuinely needs opposing framings.
+'@
+
         $Tier3Note = @'
 Only one model is configured, so a true cross-model debate is not possible. Run the single expert twice with opposing framings, once to defend the proposal and once to break it. Give both runs NESTED REVIEW: SKIP, then adjudicate the positions yourself.
 '@
+
+        $Tier3Cost = 'Cost: two sequential expert calls and no reviewer calls, so two model invocations.'
+
+        $Tier4Body = @'
+Unavailable. Only one model is configured, so a parallel team would be the same expert repeated against itself. Stay at Tier 1, or use Tier 3 when opposing framings are genuinely needed.
+'@
+
+        $NestedReviewRequiredLine = 'Use REQUIRED for every Tier 5 branch.'
+        $NestedReviewSkipLine = 'Use SKIP for Tier 1 and for both runs of the single-model Tier 3 fallback.'
     }
 
     return @"
@@ -2704,15 +2796,7 @@ Include NESTED REVIEW: SKIP in the delegation brief.
 
 ### Tier 2 - Two experts in parallel
 
-Use when:
-
-- at least two models are configured, and
-- the task spans two lenses, and
-- there is a real design or implementation choice to make, or the change touches shared code or public behavior
-
-Invoke both experts in the same turn with distinct, non-overlapping scopes, then synthesize. Cost: two parallel expert calls.
-
-Include NESTED REVIEW: SKIP in both delegation briefs.
+$Tier2Body
 
 ### Tier 3 - Adversarial debate
 
@@ -2726,29 +2810,17 @@ A disagreement you can settle by reading a file or running a command is not a Ti
 
 $Tier3Note
 
-Cost: two expert calls plus their nested reviews, so roughly four model invocations.
+$Tier3Cost
 
 ### Tier 4 - Parallel engineering team
 
-Use ONLY when at least two models are configured and at least one of these is true:
-
-- the user explicitly asked for the full team or a complete review
-- the work spans several genuinely independent subsystems that need different lenses at once
-- a difficult bug has already survived a Tier 1 or Tier 2 attempt
-
-Breadth of files alone is not a Tier 4 trigger. A large but uniform change is Tier 1 or Tier 2.
-
-Fan out one expert per configured model, each with its own lens and its own scope.
-
-Nested review is off by default. Include NESTED REVIEW: SKIP for every branch unless that branch independently meets the Tier 3 conditions and no cheaper evidence can settle it. For a qualifying branch, include NESTED REVIEW: AUTHORIZED, name one configured reviewer, and name the exact target to challenge.
-
-Cost: up to $ExpertCount parallel expert calls, plus at most one reviewer call for each explicitly authorized branch.
+$Tier4Body
 
 ### Tier 5 - Unconstrained brainstorming
 
 Use ONLY when the user explicitly asks for it. The request must contain a word such as "brainstorm", "deep review", or "unconstrained". Nothing else triggers this tier. Do not infer it from a large task, a vague task, or a request to be thorough.
 
-Dispatch the full parallel team exactly as in Tier 4, one expert per configured model with its own lens and its own scope. The difference is the brief, not the roster.
+Dispatch one expert per configured model, each with its own lens and its own scope. The difference from the cheaper tiers is the brief, not the roster.
 
 Append this override verbatim to EVERY delegation brief you send in this tier:
 
@@ -2762,7 +2834,7 @@ Assign different reviewers across branches when the roster permits it. Each expe
 
 The lens assignment and the out-of-scope list still apply. Unconstrained means unconstrained in length and depth, not permission for two experts to investigate the same thing or bypass the one-reviewer limit.
 
-Cost: up to $ExpertCount parallel expert calls plus $ExpertCount leaf-reviewer calls, with every branch returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
+Cost: $Tier5ExpertCost plus $Tier5ReviewerCost, with every branch returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
 
 ### Escalation rules
 
@@ -2825,9 +2897,9 @@ Invoke independent experts in a single turn so they run concurrently. Never seri
 
 Every expert delegation brief must contain NESTED REVIEW, REVIEWER, and TARGET fields.
 
-- Use REQUIRED for both cross-model Tier 3 branches and every Tier 5 branch.
+- $NestedReviewRequiredLine
 - Use AUTHORIZED only for a Tier 4 branch that independently meets Tier 3 conditions.
-- Use SKIP for Tier 1, Tier 2, the single-model Tier 3 fallback, and all other Tier 4 branches.
+- $NestedReviewSkipLine
 - REQUIRED and AUTHORIZED must name one reviewer the expert is allowed to invoke and one concrete target.
 - SKIP must use REVIEWER: NONE and TARGET: NONE.
 
@@ -2901,6 +2973,14 @@ Keep each entry short enough to actually read. Summarize the deliberation. Do no
 At Tier 5 this section carries the depth. Give each expert's stance the room its report earned and keep its specific findings intact rather than trimming to one or two lines. The instruction to keep entries short applies to every other tier.
 
 At Tier 0 you used no experts, so skip the deliberation section entirely and keep the answer as short as the question deserves.
+
+### TL;DR
+
+Close every final response with a section titled TL;DR. It goes last, after the council deliberation, so a reader who skims a long answer still leaves with the correct conclusion.
+
+Write two to five plain-language bullets covering what the answer is or what changed, what it means for the user, and anything they still have to act on. Name outcomes rather than describing the process that produced them.
+
+Introduce nothing that appears nowhere else in the response, and never use it to soften a finding you reported plainly above. Skip it only when the entire answer is already shorter than the summary would be.
 "@
 }
 
@@ -3291,7 +3371,11 @@ function Get-VSCodeStatus
 
         try
         {
-            foreach ($Entry in @(Read-Utf8File -Path $ExtensionsJsonPath | ConvertFrom-Json))
+            # Assigned first for the same reason as ConvertFrom-ModelCacheJson: Windows PowerShell
+            # emits a top-level JSON array as one nested Object[] when ConvertFrom-Json runs inside @().
+            $ParsedExtensions = Read-Utf8File -Path $ExtensionsJsonPath | ConvertFrom-Json
+
+            foreach ($Entry in @($ParsedExtensions))
             {
                 $Identifier = Get-PropertyValue -InputObject $Entry -Name 'identifier'
                 $Id = [string](Get-PropertyValue -InputObject $Identifier -Name 'id')
@@ -3383,7 +3467,7 @@ $OriginalAgentState = $null
 $AgentActivationStarted = $false
 $AgentActivationCommitted = $false
 $OriginalVSCodeSettingsState = $null
-$VSCodeSettingWriteAttempted = $false
+$VSCodeSettingWriteState = @{ Attempted = $false; WrittenContent = $null }
 $VSCodeSettingChanged = $false
 
 try
@@ -3723,9 +3807,11 @@ if (-not $SkipVSCodeSetting)
     $ResolvedVSCodeSettingsPath = Get-VSCodeUserSettingsPath -ExplicitPath $VSCodeSettingsPath
     $OriginalVSCodeSettingsState = Get-FileStateSnapshot -Path $ResolvedVSCodeSettingsPath
 
-    # Set before the call, because the write happens before the verification that can still throw.
-    $VSCodeSettingWriteAttempted = $true
-    $VSCodeSettingChanged = Set-VSCodeNestedSubagentsSetting -SettingsPath $ResolvedVSCodeSettingsPath -BackupDirectory $BackupDirectory
+    # The function records the write itself, because the paths rollback exists for never return.
+    $VSCodeSettingChanged = Set-VSCodeNestedSubagentsSetting `
+        -SettingsPath $ResolvedVSCodeSettingsPath `
+        -BackupDirectory $BackupDirectory `
+        -WriteState $VSCodeSettingWriteState
 
     Complete-InstallStep
 }
@@ -4088,16 +4174,39 @@ catch
         }
     }
 
-    if ($VSCodeSettingWriteAttempted -and -not $AgentActivationCommitted -and $null -ne $OriginalVSCodeSettingsState)
+    if ($VSCodeSettingWriteState.Attempted -and -not $AgentActivationCommitted -and $null -ne $OriginalVSCodeSettingsState)
     {
-        try
+        # Restoring is only safe while the file still holds exactly what this run wrote. Anything else
+        # means someone edited it afterwards, and their version outranks a stale snapshot.
+        $SettingsStillOurs = $true
+
+        if ($null -ne $VSCodeSettingWriteState.WrittenContent)
         {
-            Restore-FileStateSnapshot -Snapshot $OriginalVSCodeSettingsState
-            Write-Console 'Restored the previous VS Code nested-subagent setting after the failed activation.' -Level 'Warning'
+            try
+            {
+                $SettingsStillOurs = (Read-Utf8File -Path $ResolvedVSCodeSettingsPath) -ceq $VSCodeSettingWriteState.WrittenContent
+            }
+            catch
+            {
+                $SettingsStillOurs = $false
+            }
         }
-        catch
+
+        if (-not $SettingsStillOurs)
         {
-            Write-Console "Could not restore the VS Code settings file. Use the backup directory to recover: $BackupDirectory" -Level 'Warning'
+            Write-Console "The VS Code settings file changed after the installer wrote it, so it was left alone. Recover the previous version from $BackupDirectory if you need it." -Level 'Warning'
+        }
+        else
+        {
+            try
+            {
+                Restore-FileStateSnapshot -Snapshot $OriginalVSCodeSettingsState
+                Write-Console 'Restored the previous VS Code nested-subagent setting after the failed activation.' -Level 'Warning'
+            }
+            catch
+            {
+                Write-Console "Could not restore the VS Code settings file. Use the backup directory to recover: $BackupDirectory" -Level 'Warning'
+            }
         }
     }
 

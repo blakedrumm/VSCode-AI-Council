@@ -21,6 +21,7 @@ BeforeAll {
         'Get-FileStateSnapshot',
         'Restore-FileStateSnapshot',
         'Backup-ExistingFile',
+        'Remove-ExpiredBackup',
         'Test-ModelName',
         'ConvertTo-AgentSlug',
         'Get-PropertyValue',
@@ -67,7 +68,7 @@ BeforeAll {
 
     # The generators read these script-level constants, so the harness has to load the real values
     # rather than restate them, or the tests would stop tracking the installer.
-    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'LensCatalog', 'MaxModelCount'))
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount'))
     {
         $ConstantAst = $script:InstallerAst.Find(
             {
@@ -425,6 +426,95 @@ Describe 'VS Code settings mutation' {
             Should -Be ([Convert]::ToBase64String($OriginalBytes))
         Test-Path -LiteralPath $BackupPath | Should -BeFalse
     }
+
+    It 'enables the setting in an empty or whitespace-only file' -ForEach @(
+        @{ Label = 'empty'; Text = '' }
+        @{ Label = 'whitespace'; Text = "  `r`n  " }
+    ) {
+        $SettingsPath = Join-Path $script:SettingsTestRoot "settings-$Label.json"
+        $BackupPath = Join-Path $script:SettingsTestRoot 'backup'
+        [System.IO.File]::WriteAllText($SettingsPath, $Text, $script:Utf8WithoutBom)
+
+        Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath | Should -BeTrue
+
+        $Parsed = ConvertFrom-JsoncText -Text (Read-Utf8File -Path $SettingsPath)
+        (Get-PropertyValue -InputObject $Parsed -Name $script:SettingName) | Should -BeTrue
+    }
+
+    It 'does not report a write attempt when the value is already true' {
+        $SettingsPath = Join-Path $script:SettingsTestRoot 'settings.json'
+        $BackupPath = Join-Path $script:SettingsTestRoot 'backup'
+        [System.IO.File]::WriteAllText($SettingsPath, "{ `"$script:SettingName`": true }", $script:Utf8WithoutBom)
+        $WriteState = @{ Attempted = $false; WrittenContent = $null }
+
+        Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath -WriteState $WriteState |
+            Should -BeFalse
+
+        # Rollback keys off this flag, so a false positive here overwrites a file the installer never touched.
+        $WriteState.Attempted | Should -BeFalse
+        $WriteState.WrittenContent | Should -BeNullOrEmpty
+    }
+
+    It 'reports the exact written content when it does change the file' {
+        $SettingsPath = Join-Path $script:SettingsTestRoot 'settings.json'
+        $BackupPath = Join-Path $script:SettingsTestRoot 'backup'
+        [System.IO.File]::WriteAllText($SettingsPath, "{ `"editor.fontSize`": 14 }", $script:Utf8WithoutBom)
+        $WriteState = @{ Attempted = $false; WrittenContent = $null }
+
+        Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath -WriteState $WriteState |
+            Should -BeTrue
+
+        $WriteState.Attempted | Should -BeTrue
+        $WriteState.WrittenContent | Should -BeExactly (Read-Utf8File -Path $SettingsPath)
+    }
+}
+
+Describe 'Backup retention' {
+    BeforeEach {
+        $script:BackupTestRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-backup-$([guid]::NewGuid().ToString('N'))"
+        New-Item -Path $script:BackupTestRoot -ItemType Directory -Force | Out-Null
+
+        foreach ($Index in 1..20)
+        {
+            New-Item -Path (Join-Path $script:BackupTestRoot ('v5_20260101_{0:D9}' -f $Index)) -ItemType Directory -Force | Out-Null
+        }
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:BackupTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'counts the current backup against the retention cap' {
+        $Current = Join-Path $script:BackupTestRoot 'v5_20260101_000000020'
+
+        Remove-ExpiredBackup -BackupRoot $script:BackupTestRoot -CurrentBackupDirectory $Current -KeepCount 10 6>$null
+
+        @(Get-ChildItem -LiteralPath $script:BackupTestRoot -Directory).Count | Should -Be 10
+        Test-Path -LiteralPath $Current | Should -BeTrue
+    }
+
+    It 'keeps the retention count when this run created no backup' {
+        $Absent = Join-Path $script:BackupTestRoot 'v5_20260101_000000099'
+
+        Remove-ExpiredBackup -BackupRoot $script:BackupTestRoot -CurrentBackupDirectory $Absent -KeepCount 10 6>$null
+
+        @(Get-ChildItem -LiteralPath $script:BackupTestRoot -Directory).Count | Should -Be 10
+    }
+
+    It 'leaves directories that do not match the backup pattern' {
+        New-Item -Path (Join-Path $script:BackupTestRoot 'my-own-notes') -ItemType Directory -Force | Out-Null
+
+        Remove-ExpiredBackup `
+            -BackupRoot $script:BackupTestRoot `
+            -CurrentBackupDirectory (Join-Path $script:BackupTestRoot 'v5_20260101_000000020') `
+            -KeepCount 10 6>$null
+
+        Test-Path -LiteralPath (Join-Path $script:BackupTestRoot 'my-own-notes') | Should -BeTrue
+    }
+
+    It 'defaults to the retention count stated in the documentation' {
+        $script:BackupRetentionCount | Should -Be 10
+    }
 }
 
 Describe 'End-to-end workspace install' {
@@ -498,5 +588,78 @@ Describe 'End-to-end workspace install' {
         {
             $AgentFile.LastWriteTimeUtc | Should -Be $Before[$AgentFile.Name]
         }
+    }
+
+    It 'rewrites a file whose bytes drifted even though its text did not' {
+        $Arguments = @{
+            Scope = 'Workspace'
+            WorkspacePath = $script:InstallTestRoot
+            NonInteractive = $true
+            SkipUpdateCheck = $true
+            SkipVSCodeSetting = $true
+            Models = @('Claude Opus 5', 'Grok 4.5')
+        }
+
+        & $script:InstallerPath @Arguments | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Target = Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md'
+        $Text = Read-Utf8File -Path $Target
+
+        # A BOM decodes to the same text, so a skip decision based on text instead of bytes would
+        # leave front matter VS Code cannot parse.
+        [System.IO.File]::WriteAllText($Target, $Text, (New-Object System.Text.UTF8Encoding($true)))
+        [System.IO.File]::ReadAllBytes($Target)[0] | Should -Be 0xEF
+
+        & $script:InstallerPath @Arguments | Out-Null
+
+        [System.IO.File]::ReadAllBytes($Target)[0] | Should -Not -Be 0xEF
+        Read-Utf8File -Path $Target | Should -BeExactly $Text
+    }
+
+    It 'generates a coherent single-model council' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        @(Get-ChildItem -LiteralPath $AgentDirectory -Filter '*.agent.md' -File).Count | Should -Be 3
+
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+
+        # Tiers 2 and 4 need a second model, so a one-model roster must not advertise them.
+        $Coordinator | Should -Match '(?m)^### Tier 2 - Two experts in parallel\r?\n\r?\nUnavailable\.'
+        $Coordinator | Should -Match '(?m)^### Tier 4 - Parallel engineering team\r?\n\r?\nUnavailable\.'
+
+        # The single-model Tier 3 fallback skips nested review, so it cannot be priced as including it.
+        $Coordinator | Should -Not -Match 'roughly four model invocations'
+        $Coordinator | Should -Not -Match 'up to 1 parallel expert calls'
+        $Coordinator | Should -Not -Match '1 leaf-reviewer calls'
+
+        # The expert and the coordinator have to state the same nested-review policy.
+        $Expert | Should -Match 'The single-model Tier 3 fallback uses SKIP\.'
+        $Expert | Should -Not -Match 'Tier 3 and Tier 5 use REQUIRED'
+    }
+
+    It 'tells the coordinator to close with a TL;DR' -ForEach @(
+        @{ Label = 'one model'; Models = @('Claude Opus 5') }
+        @{ Label = 'two models'; Models = @('Claude Opus 5', 'Grok 4.5') }
+    ) {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models $Models | Out-Null
+
+        $Coordinator = Read-Utf8File -Path (Join-Path $script:InstallTestRoot '.github\agents\multi-model-engineering-council.agent.md')
+
+        $Coordinator | Should -Match '(?m)^### TL;DR\r?$'
     }
 }

@@ -5,6 +5,51 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.3
+
+Every item below was found by a full council review of 5.7.2 and reproduced with a failing test
+before it was fixed. Four of them were introduced by 5.7.0 or 5.7.2.
+
+### Fixed
+
+- **Rollback could destroy a settings file the installer never wrote.** 5.7.2 set its rollback flag
+  before calling the settings editor, so the flag meant "reached this step" rather than "changed
+  this file". Any later activation failure then restored a stale snapshot over settings the
+  installer had not touched, and the guard that refuses to write when the file changed underneath it
+  threw straight into that restore, turning a safety check into the data loss it existed to prevent.
+  The editor now records the write itself, and rollback restores only while the file still holds
+  exactly the bytes this run wrote. Proven by fault injection, with a negative control confirming a
+  genuine write is still rolled back.
+- **An empty settings.json permanently blocked the setting.** An empty or whitespace-only file is
+  parsed as `{}`, but the pre-write concurrency check compared the real file against that
+  substitute, so it always reported that VS Code had changed the file and refused to write. The
+  check now compares the file against its own original text.
+- **Windows PowerShell reported Copilot as missing when it was installed.** Reading
+  `extensions.json` repeated the top-level JSON array bug fixed elsewhere in 5.7.1: Windows
+  PowerShell collapses the array into a single element inside `@()`, so every extension id merged
+  into one unmatchable string.
+- **Cache read errors were reported as an empty cache.** A failed SQLite prepare or step, or a
+  malformed value, returned success with no records, so the retry added in 5.7.2 never fired for the
+  torn-snapshot case it was built for and the installer fell back to the built-in catalog instead.
+- **Backup retention kept eleven directories, not ten.** The current run's folder was excluded from
+  the sort before the cap was applied, so it was never charged against the documented limit.
+
+### Changed
+
+- **A single-model install no longer contradicts itself.** Tiers 2 and 4 require a second model, yet
+  a one-model roster still advertised them, priced its Tier 3 fallback as including nested reviews
+  it explicitly skips, disagreed with its own expert file about that policy, and emitted "up to 1
+  parallel expert calls". Those tiers are now marked unavailable, the costs match the behavior, and
+  the coordinator and expert state one policy. The root cause was that no test used a one-model
+  roster, so the entire branch was unexecuted.
+- **The coordinator now closes every answer with a TL;DR.** Long multi-expert responses were hard to
+  act on at a glance, so the final response ends with a short plain-language summary of the outcome.
+- Four `continue` statements in the JSON tokenizer were removed. Inside a `switch` they only leave
+  the switch rather than the enclosing loop, so they read as flow control while doing nothing.
+- The regression suite is now 39 tests on PowerShell 7 and Windows PowerShell 5.1, covering the
+  single-model roster end to end, settings rollback state, empty settings files, retention limits,
+  and a byte order mark added to an otherwise unchanged agent file.
+
 ## 5.7.2
 
 ### Fixed
