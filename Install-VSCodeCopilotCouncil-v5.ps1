@@ -171,7 +171,7 @@
         August 11th, 2026
 
     Version:
-        5.6.0
+        5.6.1
 
     Compatible with:
         Windows PowerShell 5.1
@@ -295,7 +295,7 @@ $CoordinatorFileName = 'multi-model-engineering-council.agent.md'
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.6.0'
+$ScriptVersion = '5.6.1'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'

@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.6.1
+
+No change to the installer's behavior. This is the first release published by the release workflow
+rather than by hand.
+
+### Changed
+
+- **Releases are now built and published by `.github/workflows/release.yml`.** It reads
+  `$ScriptVersion`, refuses to continue when the `.NOTES` help block disagrees with it, runs the
+  parser, PSScriptAnalyzer, and a real non-interactive install that exercises `Test-AgentFile`,
+  then publishes the release. The release commit must be reachable from `main`, and the assets are
+  extracted from that commit with `git archive` rather than copied from the working tree.
+- **`Install-VSCodeCopilotCouncil-v5.txt` is now published alongside the `.ps1`**, as a
+  byte-identical copy for downloaders whose mail gateway or proxy blocks a `.ps1`. It is generated
+  during the release rather than committed, so the two cannot drift, and the release notes publish
+  both SHA-256 digests so the match can be verified.
+
 ## 5.6.0
 
 ### Added
