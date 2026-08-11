@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.3
+        5.7.4
 
     Compatible with:
         Windows PowerShell 5.1
@@ -297,12 +297,27 @@ $ReviewerAgentTools = @('read', 'search', 'web')
 $ExpertAgentTools = @('agent', 'read', 'search', 'web')
 $CoordinatorAgentTools = @('agent', 'read', 'search', 'edit', 'execute', 'web', 'todo')
 
+# Rendered into the expert, reviewer, and coordinator prompts. Two hand-maintained copies had
+# already drifted at item 6, which is the kind of disagreement the list itself exists to settle.
+$EvidenceHierarchy = @(
+    'Repository source code',
+    'Reproducible tests',
+    'Runtime, compiler, or interpreter behavior',
+    'Official documentation',
+    'API specifications',
+    'Platform diagnostics and logs',
+    'Logical consistency',
+    'Established engineering practice'
+)
+
+$EvidenceHierarchyText = (0..($EvidenceHierarchy.Count - 1) | ForEach-Object { "$($_ + 1). $($EvidenceHierarchy[$_])" }) -join "`n"
+
 # Backup folders are timestamped per run, so without a cap they accumulate for the life of the profile.
 $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.3'
+$ScriptVersion = '5.7.4'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -643,7 +658,12 @@ function Write-Utf8File
                 {
                     try
                     {
-                        $TargetMatchesOutput = [System.IO.File]::ReadAllText($Path, $Utf8WithoutBom) -ceq $OutputContent
+                        # Compared as bytes: a BOM or an invalid sequence can decode equal to the
+                        # desired text while the file on disk is not what was written.
+                        $ActualBytes = [System.IO.File]::ReadAllBytes($Path)
+                        $ExpectedBytes = $Utf8WithoutBom.GetBytes($OutputContent)
+
+                        $TargetMatchesOutput = [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($ActualBytes, $ExpectedBytes)
                     }
                     catch
                     {
@@ -1391,7 +1411,30 @@ function Get-PreviousCouncilConfiguration
     $PreviousModels = New-Object System.Collections.Generic.List[string]
     $FrontMatterRoster = $null
 
-    foreach ($Line in $Lines)
+    # Only the leading delimited block is front matter. Scanning the whole file would let any line in
+    # the prompt body, which is workspace-controlled text, impersonate a roster declaration. An
+    # unterminated block is not front matter at all, or the body would be trusted again.
+    $FrontMatterLines = New-Object System.Collections.Generic.List[string]
+
+    if ($Lines.Count -gt 0 -and $Lines[0].Trim() -eq '---')
+    {
+        for ($Index = 1; $Index -lt $Lines.Count; $Index++)
+        {
+            if ($Lines[$Index].Trim() -eq '---')
+            {
+                break
+            }
+
+            $FrontMatterLines.Add($Lines[$Index])
+        }
+
+        if ($Index -ge $Lines.Count)
+        {
+            $FrontMatterLines.Clear()
+        }
+    }
+
+    foreach ($Line in $FrontMatterLines)
     {
         if ($null -eq $PreviousCoordinatorModel -and $Line -match '^model:\s*"(?<model>[^"]+)"\s*$')
         {
@@ -2212,6 +2255,17 @@ function Set-VSCodeNestedSubagentsSetting
 
         if ($SettingMatch.Value -eq 'true')
         {
+            # Nothing is written here, so a parse failure is reported rather than thrown: the value is
+            # already correct, but VS Code will ignore the whole file if it cannot parse it.
+            try
+            {
+                $null = ConvertFrom-JsoncText -Text $Content
+            }
+            catch
+            {
+                Write-Console "VS Code settings file could not be parsed, so VS Code may ignore it and leave nested subagents inactive: $SettingsPath" -Level 'Warning'
+            }
+
             Write-Console "VS Code setting is already enabled: $SettingName = true"
             Write-Console "VS Code settings file: $SettingsPath"
             return $false
@@ -2435,14 +2489,7 @@ Do not disagree to create conflict. If the conclusion is correct, say so, say wh
 
 ## Evidence order
 
-1. Repository source code
-2. Reproducible tests
-3. Runtime, compiler, or interpreter behavior
-4. Official documentation
-5. API specifications
-6. Platform behavior and logs
-7. Logical consistency
-8. Established engineering practice
+$EvidenceHierarchyText
 
 Do not invent evidence. Label any claim you could not verify as unverified.
 
@@ -2597,7 +2644,9 @@ Do not invoke a second reviewer. Do not invoke yourself. Do not attempt recursiv
 
 ## Evidence
 
-Prefer repository source code, reproducible tests, and observed runtime behavior over documentation, specifications, or convention. Confidence is not evidence. Model agreement is not evidence.
+$EvidenceHierarchyText
+
+Confidence is not evidence. Model agreement is not evidence.
 
 ## Output
 
@@ -2909,14 +2958,7 @@ Before dispatch, include the number of planned reviewer calls in the visible tie
 
 ## Disagreement resolution
 
-1. Repository source code
-2. Reproducible tests
-3. Runtime, compiler, or interpreter behavior
-4. Official documentation
-5. API specifications
-6. Platform diagnostics and logs
-7. Logical consistency
-8. Established engineering practice
+$EvidenceHierarchyText
 
 Model agreement is not evidence. Confidence is not evidence. When a tool can settle a disputed claim, settle it yourself instead of asking another model.
 

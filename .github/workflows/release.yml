@@ -13,7 +13,7 @@ on:
         required: false
         type: string
       additions:
-        description: Release additions, one item per line; bullet prefixes are optional
+        description: Release additions, one item per line; bullet prefixes are optional. Blank uses the CHANGELOG section for the version
         required: false
         type: string
       upload_sftp:
@@ -33,11 +33,11 @@ on:
         required: true
         type: string
       version:
-        description: Release version override; blank reads Install-VSCodeCopilotCouncil-v5.ps1 (leading v optional)
+        description: Optional confirmation of the version in Install-VSCodeCopilotCouncil-v5.ps1; must match it exactly (leading v optional)
         required: false
         type: string
       additions:
-        description: Release additions, one item per line
+        description: Release additions, one item per line; blank uses the CHANGELOG section for the version
         required: false
         type: string
       upload_sftp:
@@ -126,7 +126,7 @@ jobs:
           }
           $versionSource = if ($requestedVersion) { 'workflow input' } else { 'Install-VSCodeCopilotCouncil-v5.ps1' }
           if ($requestedVersion -and $releaseVersion -ne $scriptVersion) {
-            Write-Warning "Release version '$releaseVersion' overrides the script version '$scriptVersion'. The committed script will not be rewritten, so its update check will report '$scriptVersion'."
+            throw "Release version '$releaseVersion' does not match `$ScriptVersion '$scriptVersion'. The published installer would report '$scriptVersion' to its own update check, so every user would be told an update exists forever. Update the constant and the .NOTES block, then re-run."
           }
 
           $releaseCommit = (git rev-parse HEAD).Trim()
@@ -175,11 +175,14 @@ jobs:
             throw "The installer has $($parseErrors.Count) parse error(s)."
           }
 
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
           $findings = Invoke-ScriptAnalyzer -Path $scriptPath -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
+          $findings += Invoke-ScriptAnalyzer -Path './.github/scripts' -Recurse -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
+          $findings += Invoke-ScriptAnalyzer -Path './tests' -Recurse -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
           if ($findings) {
             foreach ($finding in $findings) {
-              Write-Host "::error file=Install-VSCodeCopilotCouncil-v5.ps1,line=$($finding.Line)::$($finding.RuleName) - $($finding.Message)"
+              $relativePath = (Resolve-Path -LiteralPath $finding.ScriptPath -Relative) -replace '^\.[\\/]', '' -replace '\\', '/'
+              Write-Host "::error file=$relativePath,line=$($finding.Line)::$($finding.RuleName) - $($finding.Message)"
             }
             throw 'PSScriptAnalyzer reported errors or warnings.'
           }
@@ -223,8 +226,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
-          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          Install-Module Pester -RequiredVersion 6.0.1 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 6.0.1 -Force
           Invoke-Pester -Path './tests' -CI -Output Detailed
 
       - name: Run Pester on Windows PowerShell 5.1
@@ -232,8 +235,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
-          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          Install-Module Pester -RequiredVersion 6.0.1 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 6.0.1 -Force
           Invoke-Pester -Path './tests' -CI -Output Detailed
 
       - name: Build release assets

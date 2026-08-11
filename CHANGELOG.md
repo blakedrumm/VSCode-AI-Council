@@ -5,6 +5,48 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.4
+
+Closes the findings the 5.7.2 council review left open, plus one defect found while fixing them.
+Every change is covered by a test that fails without it.
+
+### Fixed
+
+- **The evidence ranking the agents use had already drifted.** The same eight-item list was written
+  out by hand in two prompts and had diverged at item 6, and the expert prompt carried a third,
+  prose restatement of the same ranking. Experts, reviewers, and the coordinator now render one
+  shared constant, so the list the council uses to settle disagreements can no longer disagree with
+  itself.
+- **A roster could be declared from the prompt body.** Recovering a previous installation scanned
+  every line of the coordinator file for `model:` and `agents:`, so those keys anywhere in the
+  workspace-controlled prompt body were read as if they were front matter. Only the leading
+  delimited block is parsed now, and a block with no closing delimiter is treated as no front matter
+  rather than as a block that runs to the end of the file.
+- **A failed atomic replace was confirmed by decoded text.** When `File.Replace` reported an error,
+  the recovery path compared the file as text, and a byte order mark or an invalid sequence can
+  decode equal to the intended text. It now compares raw bytes, using the same comparison the
+  unchanged-file check already uses.
+- **An unparseable settings file was reported as a clean success.** When the setting was already
+  true the installer returned before validating the file, so a settings.json VS Code cannot parse
+  looked fine even though VS Code would ignore it and leave nested subagents inactive. That case now
+  warns. Nothing is written, so it is a warning rather than a failure.
+
+### Changed
+
+- **Release and validation dependencies are pinned.** Both workflows installed PSScriptAnalyzer and
+  Pester from the gallery with a floating version, and the release job runs them alongside the
+  credentials it later publishes with. Exact versions are now required, and the validation workflow
+  pins the checkout action by commit rather than by moving tag.
+- **A release cannot publish a version the installer contradicts.** Overriding the version through
+  the workflow input only warned, so a mismatched tag could ship an installer whose update check
+  would tell every user an update existed forever. The release now fails instead.
+- Static analysis covers `.github/scripts` and `tests` in both workflows, not just the installer.
+  The release-notes generator had never been analyzed, which is how a call that fails on both
+  PowerShell editions reached it. Analyzer and parser annotations now name the file they came from
+  instead of always blaming the installer.
+- The readme version badge is checked against the version constant, and the release workflow's
+  version input is described as the confirmation it now is rather than an override.
+
 ## 5.7.3
 
 Every item below was found by a full council review of 5.7.2 and reproduced with a failing test

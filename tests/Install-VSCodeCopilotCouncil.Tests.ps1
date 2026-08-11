@@ -68,7 +68,7 @@ BeforeAll {
 
     # The generators read these script-level constants, so the harness has to load the real values
     # rather than restate them, or the tests would stop tracking the installer.
-    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount'))
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount'))
     {
         $ConstantAst = $script:InstallerAst.Find(
             {
@@ -93,6 +93,14 @@ BeforeAll {
 Describe 'PowerShell syntax' {
     It 'parses without errors' {
         $script:InstallerAst | Should -Not -BeNullOrEmpty
+    }
+
+    # PowerShell cannot infer the generic argument, so this silently fails on both editions rather
+    # than erroring at parse time. It reached the release-notes generator once already.
+    It 'does not call a generic LINQ method PowerShell cannot bind' {
+        $InstallerText = [System.IO.File]::ReadAllText($script:InstallerPath)
+
+        $InstallerText | Should -Not -Match 'System\.Linq\.Enumerable'
     }
 }
 
@@ -282,6 +290,90 @@ Describe 'Previous installation recovery' {
         $Recovered.Models | Should -Be @('Claude Opus 5', 'Grok 4.5')
         $Recovered.CoordinatorModel | Should -Be 'Claude Opus 5'
     }
+
+    It 'ignores a roster declared in the prompt body rather than the front matter' {
+        $Planted = @(
+            '---'
+            'name: Multi-Model Engineering Council'
+            'model: "Claude Opus 5"'
+            "agents: ['Grok 4.5 Expert']"
+            '---'
+            ''
+            'Prompt body text that a workspace can control.'
+            ''
+            "agents: ['GPT-5.6 Sol Expert', 'Claude Sonnet 5 Expert']"
+            ''
+            'model: "Injected Model"'
+        ) -join [Environment]::NewLine
+
+        Write-Utf8File -Path (Join-Path $script:RecoveryRoot $script:CoordinatorFile) -Content $Planted
+
+        $Recovered = Get-PreviousCouncilConfiguration `
+            -AgentDirectory $script:RecoveryRoot `
+            -CoordinatorFileName $script:CoordinatorFile
+
+        $Recovered.Models | Should -Be @('Grok 4.5')
+        $Recovered.CoordinatorModel | Should -Be 'Claude Opus 5'
+    }
+
+    It 'treats an unterminated front matter block as no front matter at all' {
+        # Without a closing delimiter there is no boundary, so trusting the block would trust the body.
+        $Planted = @(
+            '---'
+            'name: Multi-Model Engineering Council'
+            'model: "Claude Opus 5"'
+            ''
+            'The block above was never closed and declares no roster.'
+            ''
+            "agents: ['GPT-5.6 Sol Expert', 'Claude Sonnet 5 Expert']"
+        ) -join [Environment]::NewLine
+
+        Write-Utf8File -Path (Join-Path $script:RecoveryRoot $script:CoordinatorFile) -Content $Planted
+
+        $Recovered = Get-PreviousCouncilConfiguration `
+            -AgentDirectory $script:RecoveryRoot `
+            -CoordinatorFileName $script:CoordinatorFile
+
+        @($Recovered.Models) | Should -Not -Contain 'GPT-5.6 Sol'
+        @($Recovered.Models) | Should -Not -Contain 'Claude Sonnet 5'
+    }
+}
+
+Describe 'Atomic file writes' {
+    BeforeEach {
+        $script:WriteTestRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-write-$([guid]::NewGuid().ToString('N'))"
+        New-Item -Path $script:WriteTestRoot -ItemType Directory -Force | Out-Null
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:WriteTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'leaves the original file intact when the replacement cannot complete' {
+        $Target = Join-Path $script:WriteTestRoot 'agent.md'
+        $Original = "original content`n"
+        [System.IO.File]::WriteAllText($Target, $Original, (New-Object System.Text.UTF8Encoding($false)))
+        $OriginalBytes = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Target))
+
+        # An exclusive handle is the deterministic way to make File.Replace fail on Windows.
+        $Handle = [System.IO.File]::Open($Target, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+
+        try
+        {
+            { Write-Utf8File -Path $Target -Content 'replacement content' } |
+                Should -Throw '*Atomic replacement failed*'
+        }
+        finally
+        {
+            $Handle.Dispose()
+        }
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Target)) | Should -Be $OriginalBytes
+
+        # A failed write must not leave its scratch files behind next to the target.
+        @(Get-ChildItem -LiteralPath $script:WriteTestRoot -File | Where-Object { $_.Name -ne 'agent.md' }) |
+            Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Generated agent policy' {
@@ -384,6 +476,21 @@ Describe 'VS Code settings mutation' {
         $Changed = Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath
 
         $Changed | Should -BeFalse
+        (Read-Utf8File -Path $SettingsPath) | Should -BeExactly $Original
+        Test-Path -LiteralPath $BackupPath | Should -BeFalse
+    }
+
+    It 'warns instead of reporting success when an already-enabled file cannot be parsed' {
+        $SettingsPath = Join-Path $script:SettingsTestRoot 'settings.json'
+        $BackupPath = Join-Path $script:SettingsTestRoot 'backup'
+        $Original = "{`n  `"$script:SettingName`": true,`n  `"broken`": [1,2,`n}"
+        [System.IO.File]::WriteAllText($SettingsPath, $Original, $script:Utf8WithoutBom)
+
+        # The value is already correct, so nothing is written, but VS Code will ignore the whole file.
+        $Output = Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath 6>&1
+
+        ($Output | Where-Object { $_ -is [bool] }) | Should -BeFalse
+        ($Output -join "`n") | Should -Match 'could not be parsed'
         (Read-Utf8File -Path $SettingsPath) | Should -BeExactly $Original
         Test-Path -LiteralPath $BackupPath | Should -BeFalse
     }
@@ -661,5 +768,28 @@ Describe 'End-to-end workspace install' {
         $Coordinator = Read-Utf8File -Path (Join-Path $script:InstallTestRoot '.github\agents\multi-model-engineering-council.agent.md')
 
         $Coordinator | Should -Match '(?m)^### TL;DR\r?$'
+    }
+
+    It 'gives every role the same evidence ranking' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Expected = (($script:EvidenceHierarchy | ForEach-Object { "$($script:EvidenceHierarchy.IndexOf($_) + 1). $_" }) -join "`n")
+
+        foreach ($FileName in @(
+                'multi-model-engineering-council.agent.md',
+                'mm-expert-claude-opus-5.agent.md',
+                'mm-reviewer-claude-opus-5.agent.md'))
+        {
+            $Text = (Read-Utf8File -Path (Join-Path $AgentDirectory $FileName)) -replace '\r', ''
+
+            $Text | Should -BeLike "*$Expected*" -Because "$FileName must render the shared evidence ranking"
+        }
     }
 }
