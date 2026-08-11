@@ -3,8 +3,11 @@
 Creates release notes for a VS Code AI Council GitHub release.
 
 .DESCRIPTION
-Formats one or more additions as a change log, records the commit and the SHA-256 of both
-published assets, and appends a download-count badge for the release version.
+Formats the release body, records the commit and the SHA-256 of both published assets, and appends
+a download-count badge for the release version.
+
+The body text comes from the CHANGELOG section matching the version, so the release notes and the
+repository history cannot drift apart. Explicit additions override that for an ad-hoc release.
 
 The .txt asset is a byte-identical copy of the .ps1, published for people whose mail gateway or
 proxy refuses a .ps1 download. Publishing both digests lets a downloader prove they match.
@@ -55,6 +58,11 @@ param
     [string]
     $Commit = '',
 
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]
+    $ChangelogPath = 'CHANGELOG.md',
+
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]
@@ -80,7 +88,54 @@ foreach ($line in @($Additions -split '\r?\n'))
     $additionLines.Add('- ' + ($trimmedLine -replace '^[-*+]\s+', ''))
 }
 
-if ($additionLines.Count -eq 0)
+$changelogLines = [Collections.Generic.List[string]]::new()
+
+if ($additionLines.Count -eq 0 -and $ChangelogPath -and (Test-Path -LiteralPath $ChangelogPath))
+{
+    $collecting = $false
+
+    foreach ($line in @([IO.File]::ReadAllText($ChangelogPath) -split '\r?\n'))
+    {
+        if ($line -match '^##(?!#)\s+')
+        {
+            if ($collecting)
+            {
+                break
+            }
+
+            $heading = ($line -replace '^##\s+', '').Trim()
+
+            if ($heading -match "^\[?v?$([regex]::Escape($Version))\]?(?:\s|$)")
+            {
+                $collecting = $true
+            }
+
+            continue
+        }
+
+        if ($collecting)
+        {
+            $sanitizedLine = [regex]::Replace($line, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '')
+
+            # Promoted so the section renders one level under the release body's own title.
+            $promotedLine = $sanitizedLine -replace '^###\s+', '## '
+
+            $changelogLines.Add($promotedLine)
+        }
+    }
+
+    while ($changelogLines.Count -gt 0 -and [string]::IsNullOrWhiteSpace($changelogLines[0]))
+    {
+        $changelogLines.RemoveAt(0)
+    }
+
+    while ($changelogLines.Count -gt 0 -and [string]::IsNullOrWhiteSpace($changelogLines[$changelogLines.Count - 1]))
+    {
+        $changelogLines.RemoveAt($changelogLines.Count - 1)
+    }
+}
+
+if ($additionLines.Count -eq 0 -and $changelogLines.Count -eq 0)
 {
     $additionLines.Add("- Released VS Code AI Council version $Version.")
 }
@@ -113,14 +168,22 @@ $badgeUrl = "https://img.shields.io/github/downloads/$Repository/$tagName/$asset
 $downloadUrl = "https://github.com/$Repository/releases/download/$tagName/$assetSegment"
 
 $content = @(
-    '# Change Log'
+    "# VS Code AI Council $Version"
     ''
-    '## Additions'
-    $additionLines.ToArray()
+    if ($changelogLines.Count -gt 0)
+    {
+        $changelogLines.ToArray()
+    }
+    else
+    {
+        '## Additions'
+        $additionLines.ToArray()
+    }
     if ($provenanceLines.Count -gt 0)
     {
         ''
         '## Package provenance'
+        ''
         $provenanceLines.ToArray()
     }
     ''

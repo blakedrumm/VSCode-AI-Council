@@ -42,6 +42,7 @@ jobs:
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
           $findings = Invoke-ScriptAnalyzer -Path './Install-VSCodeCopilotCouncil-v5.ps1' -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
+          $findings += Invoke-ScriptAnalyzer -Path './.github/scripts' -Recurse -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
 
           if ($findings)
           {
