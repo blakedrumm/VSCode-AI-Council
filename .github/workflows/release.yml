@@ -189,10 +189,10 @@ jobs:
           # settings.json on the runner.
           $workspace = Join-Path $env:RUNNER_TEMP "council-release-validation-$([guid]::NewGuid().ToString('N'))"
           $null = New-Item -Path $workspace -ItemType Directory -Force
+
+          # No $LASTEXITCODE check: that is only set by native executables, and the installer is a
+          # .ps1 that never calls exit. It throws on failure, which $ErrorActionPreference catches.
           & $scriptPath -Scope Workspace -WorkspacePath $workspace -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting -Models 'Claude Opus 5', 'Gemini 3.1 Pro (Preview)', 'GPT-5.6 Sol'
-          if ($LASTEXITCODE -ne 0) {
-            throw 'The installer failed its non-interactive validation run.'
-          }
 
           $agentDirectory = Join-Path $workspace '.github/agents'
           $agentFiles = @(Get-ChildItem -LiteralPath $agentDirectory -Filter '*.agent.md' -File)
