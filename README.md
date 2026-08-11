@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.7.1-blue" alt="Version 5.7.1">
+  <img src="https://img.shields.io/badge/version-5.7.2-blue" alt="Version 5.7.2">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -176,13 +176,13 @@ It reads the latest release tag from GitHub's release metadata. It never downloa
 |---|---|---|
 | Agent files | `~/.copilot/agents` or `<workspace>/.github/agents` | Yes, delete the `mm-*.agent.md` and coordinator files |
 | One VS Code setting | `chat.subagents.allowInvocationsFromSubagents = true` | Yes, and `-SkipVSCodeSetting` prevents it |
-| Backups | `~/.copilot/agent-backups/v5_<timestamp>` | Every file it overwrites is copied here first |
+| Backups | `~/.copilot/agent-backups/v5_<timestamp>` | Every file it overwrites is copied here first, and only the newest ten runs are kept |
 
 That setting is global. It enables nested subagents for every agent you use, not only this council.
 
 The installer does **not** enable global tool auto-approval, and does **not** enable unrestricted recursive agents.
 
-Before activating a roster, the installer generates and validates the complete agent set in a disposable directory. Live agent files are changed only after preflight succeeds. A named mutex prevents concurrent installers from interleaving changes, and a failed activation restores the previous agent files and the original nested-subagent setting.
+Before activating a roster, the installer validates the exact content it is about to write. Live agent files are changed only after that check passes, and a file whose bytes already match is left alone, so re-running costs nothing and produces no backup churn. A named mutex prevents concurrent installers from interleaving changes, and a failed activation restores the previous agent files and the original nested-subagent setting.
 
 The repository's Pester suite runs the same behavioral checks on PowerShell 7 and Windows PowerShell 5.1, including non-ASCII model names, settings mutation, generated front matter, and Tier 5 review policy.
 

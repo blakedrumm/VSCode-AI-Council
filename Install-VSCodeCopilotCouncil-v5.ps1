@@ -72,7 +72,8 @@
     is correspondingly weaker. The picker prints the date the rule was last revised alongside it.
 
     Existing agent files and VS Code settings are backed up before modification and restored if
-    agent activation fails before the new roster is fully validated.
+    agent activation fails before the new roster is fully validated. Older backup folders beyond the
+    newest few are pruned after a successful install.
 
 .PARAMETER Scope
     Determines where the custom agent files are installed.
@@ -172,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.1
+        5.7.2
 
     Compatible with:
         Windows PowerShell 5.1
@@ -226,6 +227,7 @@ param
     [string]
     $WorkspacePath,
 
+    # The upper bound must equal $LensCatalog.Count; an attribute argument cannot reference a variable.
     [Parameter()]
     [ValidateCount(1, 5)]
     [string[]]
@@ -286,17 +288,21 @@ $ErrorActionPreference = 'Stop'
 
 #region 1. Script configuration
 
-# The five lenses below are the hard ceiling on model count, since a sixth model would have to
-# reuse a lens and two experts would then duplicate each other's work.
-$MaxModelCount = 5
-
 # The coordinator is the only agent the user ever selects. Everything else is a hidden worker.
 $CoordinatorAgentName = 'Multi-Model Engineering Council'
 $CoordinatorFileName = 'multi-model-engineering-council.agent.md'
 
+# Declared once so the generated front matter and its post-install assertion cannot drift apart.
+$ReviewerAgentTools = @('read', 'search', 'web')
+$ExpertAgentTools = @('agent', 'read', 'search', 'web')
+$CoordinatorAgentTools = @('agent', 'read', 'search', 'edit', 'execute', 'web', 'todo')
+
+# Backup folders are timestamped per run, so without a cap they accumulate for the life of the profile.
+$BackupRetentionCount = 10
+
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.1'
+$ScriptVersion = '5.7.2'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -380,6 +386,10 @@ $LensCatalog = @(
         )
     }
 )
+
+# One lens per model, so the catalog length is the real ceiling. A sixth model would have to reuse
+# a lens, and two experts would then duplicate each other's work.
+$MaxModelCount = $LensCatalog.Count
 
 #endregion
 
@@ -800,8 +810,59 @@ function Backup-ExistingFile
 
     Copy-Item -LiteralPath $Path -Destination $BackupPath -Force
 
-    Write-Console "Backed up existing file: $Path"
-    Write-Console "Backup copy: $BackupPath"
+    Write-Console "Backed up $FileName to $BackupPath" -Level 'Detail'
+}
+
+# Removes backup folders beyond the newest $KeepCount, never the folder this run is still using.
+function Remove-ExpiredBackup
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $BackupRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $CurrentBackupDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]
+        $KeepCount
+    )
+
+    if (-not (Test-Path -LiteralPath $BackupRoot))
+    {
+        return
+    }
+
+    # The folder name is a sortable timestamp, so newest-first is a plain descending name sort.
+    $CurrentName = Split-Path -Path $CurrentBackupDirectory -Leaf
+
+    $Expired = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^v5_\d{8}_\d{9}$' -and $_.Name -ne $CurrentName } |
+            Sort-Object -Property 'Name' -Descending |
+            Select-Object -Skip $KeepCount)
+
+    $Removed = 0
+
+    foreach ($Directory in $Expired)
+    {
+        try
+        {
+            Remove-Item -LiteralPath $Directory.FullName -Recurse -Force
+            $Removed++
+        }
+        catch
+        {
+            Write-Verbose "Could not remove the old backup folder $($Directory.FullName). $($_.Exception.Message)"
+        }
+    }
+
+    if ($Removed -gt 0)
+    {
+        Write-Console "Removed $Removed backup folder(s) beyond the newest $KeepCount." -Level 'Detail'
+    }
 }
 
 #endregion
@@ -1054,6 +1115,9 @@ function ConvertFrom-ModelCacheJson
 #
 # Category is the size class VS Code publishes: powerful, versatile, or lightweight. The
 # recommendation logic depends on it, because a model name alone does not reveal its size.
+#
+# The result is wrapped in an object because a bare empty array collapses to $null on return, and
+# the caller has to tell an unreadable snapshot from one that simply held no agent-capable model.
 function Get-CachedModelRecord
 {
     param
@@ -1086,7 +1150,7 @@ function Get-CachedModelRecord
 
         if ([VSCodeCouncil.SqliteCacheV1]::Open([System.Text.Encoding]::UTF8.GetBytes("$TempCopy`0"), [ref]$Database, $ReadOnly, [IntPtr]::Zero) -ne 0)
         {
-            return @()
+            return [PSCustomObject]@{ Succeeded = $false; Records = @() }
         }
 
         foreach ($Sql in @(
@@ -1171,7 +1235,7 @@ function Get-CachedModelRecord
 
                         if ($Records.Count -gt 0)
                         {
-                            return @($Records | Sort-Object -Property 'Name')
+                            return [PSCustomObject]@{ Succeeded = $true; Records = @($Records | Sort-Object -Property 'Name') }
                         }
                     }
                 }
@@ -1189,6 +1253,8 @@ function Get-CachedModelRecord
     catch
     {
         Write-Verbose "Could not read models from $StatePath. $($_.Exception.Message)"
+
+        return [PSCustomObject]@{ Succeeded = $false; Records = @() }
     }
     finally
     {
@@ -1207,7 +1273,7 @@ function Get-CachedModelRecord
         Remove-Item -LiteralPath "$TempCopy-shm" -Force -ErrorAction SilentlyContinue
     }
 
-    return @()
+    return [PSCustomObject]@{ Succeeded = $true; Records = @() }
 }
 
 # Tries the stable VS Code state database first, then Insiders, and returns the first one that
@@ -1236,11 +1302,17 @@ function Get-VSCodeModelCatalog
 
         for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++)
         {
-            $Names = @(Get-CachedModelRecord -StatePath $StatePath)
+            $Result = Get-CachedModelRecord -StatePath $StatePath
 
-            if ($Names.Count -gt 0)
+            if ($Result.Succeeded)
             {
-                return $Names
+                if ($Result.Records.Count -gt 0)
+                {
+                    return $Result.Records
+                }
+
+                # The snapshot was readable and held nothing usable, so a second copy cannot help.
+                break
             }
 
             if ($Attempt -lt $MaximumAttempts)
@@ -1295,6 +1367,7 @@ function Get-PreviousCouncilConfiguration
     $PreviousCoordinatorModel = $null
     $SeenModels = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
     $PreviousModels = New-Object System.Collections.Generic.List[string]
+    $FrontMatterRoster = $null
 
     foreach ($Line in $Lines)
     {
@@ -1304,14 +1377,43 @@ function Get-PreviousCouncilConfiguration
             continue
         }
 
-        # Matches the roster line this installer writes: "- <Model> Expert running <Model>, primary lens <Lens>".
-        if ($Line -match '^-\s.+\sExpert\srunning\s(?<model>[^,]+),\sprimary\slens\s.+$')
+        if ($null -eq $FrontMatterRoster -and $Line -match '^agents:\s*\[(?<agents>.*)\]\s*$')
         {
-            $Candidate = $Matches['model'].Trim()
+            $FrontMatterRoster = $Matches['agents']
+        }
+    }
 
-            if ((Test-ModelName -Name $Candidate) -and $SeenModels.Add($Candidate))
+    # The front-matter roster is machine-readable and is asserted at install time, so it is preferred
+    # over the prose line, which changes whenever the coordinator prompt is reworded.
+    if ($null -ne $FrontMatterRoster)
+    {
+        foreach ($Entry in ($FrontMatterRoster -split ','))
+        {
+            if ($Entry.Trim().Trim("'") -match '^(?<model>.+)\sExpert$')
             {
-                $PreviousModels.Add($Candidate)
+                $Candidate = $Matches['model'].Trim()
+
+                if ((Test-ModelName -Name $Candidate) -and $SeenModels.Add($Candidate))
+                {
+                    $PreviousModels.Add($Candidate)
+                }
+            }
+        }
+    }
+
+    if ($PreviousModels.Count -lt 1)
+    {
+        # Matches the roster line this installer writes: "- <Model> Expert running <Model>, primary lens <Lens>".
+        foreach ($Line in $Lines)
+        {
+            if ($Line -match '^-\s.+\sExpert\srunning\s(?<model>[^,]+),\sprimary\slens\s.+$')
+            {
+                $Candidate = $Matches['model'].Trim()
+
+                if ((Test-ModelName -Name $Candidate) -and $SeenModels.Add($Candidate))
+                {
+                    $PreviousModels.Add($Candidate)
+                }
             }
         }
     }
@@ -2162,7 +2264,7 @@ function Set-VSCodeNestedSubagentsSetting
 
     if ((Get-PropertyValue -InputObject $WrittenSettings -Name $SettingName) -ne $true)
     {
-        throw "Failed to verify $SettingName=true in $SettingsPath"
+        throw "Failed to verify $SettingName=true in $SettingsPath. A backup was written to $BackupDirectory"
     }
 
     Write-Console "Enabled VS Code setting: $SettingName = true"
@@ -2260,7 +2362,7 @@ function New-ReviewerAgentContent
         -Model $ModelName `
         -UserInvocable $false `
         -DisableModelInvocation $false `
-        -Tools @('read', 'search', 'web')
+        -Tools $ReviewerAgentTools
 
     return @"
 $FrontMatter
@@ -2362,7 +2464,7 @@ function New-ExpertAgentContent
         -Model $ModelName `
         -UserInvocable $false `
         -DisableModelInvocation $false `
-        -Tools @('agent', 'read', 'search', 'web') `
+        -Tools $ExpertAgentTools `
         -Agents $ReviewerNames
 
     $FocusBlock = ($LensFocus | ForEach-Object { "- $_" }) -join "`n"
@@ -2514,7 +2616,7 @@ function New-CoordinatorAgentContent
         -Model $ModelName `
         -UserInvocable $true `
         -DisableModelInvocation $true `
-        -Tools @('agent', 'read', 'search', 'edit', 'execute', 'web', 'todo') `
+        -Tools $CoordinatorAgentTools `
         -Agents $ExpertNames
 
     $RosterBlock = ($ExpertMap | ForEach-Object {
@@ -2829,6 +2931,29 @@ function Install-AgentFile
     )
 
     $DestinationPath = Join-Path -Path $AgentDirectory -ChildPath $FileName
+    $DesiredBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((ConvertTo-NormalizedText -Text $Content))
+
+    if ([System.IO.File]::Exists($DestinationPath))
+    {
+        $CurrentBytes = $null
+
+        try
+        {
+            $CurrentBytes = [System.IO.File]::ReadAllBytes($DestinationPath)
+        }
+        catch
+        {
+            $CurrentBytes = $null
+        }
+
+        # Compared as bytes, not decoded text, because a decoded string hides a byte order mark that
+        # must never reach the front matter.
+        if ($null -ne $CurrentBytes -and [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($CurrentBytes, $DesiredBytes))
+        {
+            Write-Console "Agent already current: $DestinationPath" -Level 'Detail'
+            return
+        }
+    }
 
     Backup-ExistingFile -Path $DestinationPath -BackupDirectory $BackupDirectory
     Write-Utf8File -Path $DestinationPath -Content $Content
@@ -2849,11 +2974,21 @@ function Install-AgentFile
 # to catch that.
 function Test-AgentFile
 {
+    [CmdletBinding(DefaultParameterSetName = 'Path')]
     param
     (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Path')]
         [string]
         $Path,
+
+        # Lets the preflight assert the exact content the live write will produce, without disk I/O.
+        [Parameter(Mandatory = $true, ParameterSetName = 'Content')]
+        [string]
+        $Content,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Content')]
+        [string]
+        $Source,
 
         [Parameter(Mandatory = $true)]
         [string]
@@ -2871,6 +3006,10 @@ function Test-AgentFile
         [bool]
         $ExpectedDisableModelInvocation,
 
+        [Parameter(Mandatory = $true)]
+        [string[]]
+        $ExpectedTools,
+
         [Parameter()]
         [string[]]
         $ExpectedAgents,
@@ -2885,12 +3024,19 @@ function Test-AgentFile
         $MustNotSelfReview
     )
 
-    if (-not (Test-Path -LiteralPath $Path))
+    if ($PSCmdlet.ParameterSetName -eq 'Path')
     {
-        throw "Agent validation failed because the file does not exist: $Path"
-    }
+        if (-not (Test-Path -LiteralPath $Path))
+        {
+            throw "Agent validation failed because the file does not exist: $Path"
+        }
 
-    $Content = Read-Utf8File -Path $Path
+        $Content = Read-Utf8File -Path $Path
+    }
+    else
+    {
+        $Path = $Source
+    }
 
     # The body is prose that may legitimately quote front-matter syntax as an example, so every
     # structural assertion runs against the front matter alone rather than the whole file.
@@ -2936,6 +3082,18 @@ function Test-AgentFile
     if ($FrontMatter -notmatch [regex]::Escape("disable-model-invocation: $ExpectedDisableModelInvocationText"))
     {
         throw "Agent validation failed. Expected disable-model-invocation: $ExpectedDisableModelInvocationText in $Path"
+    }
+
+    if ($FrontMatter -notmatch '(?m)^target: vscode\r?$')
+    {
+        throw "Agent validation failed. Expected target: vscode in $Path"
+    }
+
+    $ExpectedToolsLine = "tools: [$(($ExpectedTools | ForEach-Object { "'$_'" }) -join ', ')]"
+
+    if ($FrontMatter -notmatch [regex]::Escape($ExpectedToolsLine))
+    {
+        throw "Agent validation failed. Expected tool list '$ExpectedToolsLine' was not found in $Path"
     }
 
     # A template variable that fails to expand produces short instructions or empty list items,
@@ -2986,23 +3144,33 @@ function Test-GeneratedAgentFile
     param
     (
         [Parameter(Mandatory = $true)]
-        [string]
-        $Directory,
-
-        [Parameter(Mandatory = $true)]
         [object]
-        $Record
+        $Record,
+
+        # Omit to validate the generated content in memory instead of a file already on disk.
+        [Parameter()]
+        [string]
+        $Directory
     )
 
-    Test-AgentFile `
-        -Path (Join-Path -Path $Directory -ChildPath $Record.FileName) `
-        -ExpectedName $Record.ExpectedName `
-        -ExpectedModel $Record.ExpectedModel `
-        -ExpectedUserInvocable $Record.ExpectedUserInvocable `
-        -ExpectedDisableModelInvocation $Record.ExpectedDisableModelInvocation `
-        -ExpectedAgents $Record.ExpectedAgents `
-        -MustNotDelegate:$Record.MustNotDelegate `
-        -MustNotSelfReview:$Record.MustNotSelfReview
+    $Expectation = @{
+        ExpectedName = $Record.ExpectedName
+        ExpectedModel = $Record.ExpectedModel
+        ExpectedUserInvocable = $Record.ExpectedUserInvocable
+        ExpectedDisableModelInvocation = $Record.ExpectedDisableModelInvocation
+        ExpectedTools = $Record.ExpectedTools
+        ExpectedAgents = $Record.ExpectedAgents
+        MustNotDelegate = $Record.MustNotDelegate
+        MustNotSelfReview = $Record.MustNotSelfReview
+    }
+
+    if ($PSBoundParameters.ContainsKey('Directory'))
+    {
+        Test-AgentFile -Path (Join-Path -Path $Directory -ChildPath $Record.FileName) @Expectation
+        return
+    }
+
+    Test-AgentFile -Content (ConvertTo-NormalizedText -Text $Record.Content) -Source "generated $($Record.FileName)" @Expectation
 }
 
 #endregion
@@ -3215,6 +3383,7 @@ $OriginalAgentState = $null
 $AgentActivationStarted = $false
 $AgentActivationCommitted = $false
 $OriginalVSCodeSettingsState = $null
+$VSCodeSettingWriteAttempted = $false
 $VSCodeSettingChanged = $false
 
 try
@@ -3479,6 +3648,10 @@ if ($Discovered)
         }
     }
 }
+elseif ($ModelsWereSupplied)
+{
+    Write-Console 'Model names were not checked against the VS Code catalog, so a typo will silently fall back to the default model.' -Level 'Detail'
+}
 
 if ($SelectedModels -contains 'Auto')
 {
@@ -3549,6 +3722,9 @@ if (-not $SkipVSCodeSetting)
 
     $ResolvedVSCodeSettingsPath = Get-VSCodeUserSettingsPath -ExplicitPath $VSCodeSettingsPath
     $OriginalVSCodeSettingsState = Get-FileStateSnapshot -Path $ResolvedVSCodeSettingsPath
+
+    # Set before the call, because the write happens before the verification that can still throw.
+    $VSCodeSettingWriteAttempted = $true
     $VSCodeSettingChanged = Set-VSCodeNestedSubagentsSetting -SettingsPath $ResolvedVSCodeSettingsPath -BackupDirectory $BackupDirectory
 
     Complete-InstallStep
@@ -3604,20 +3780,10 @@ foreach ($Expert in $ExpertMap)
 {
     if ($CrossModelReview)
     {
-        # Ordinal, because Select-Object -Unique is case-sensitive and can leave two spellings of
-        # one model in the list. A case-insensitive match would then exclude both and yield nothing.
-        $PeerReviewers = @($ExpertMap |
-                Where-Object { -not [string]::Equals($_.ModelName, $Expert.ModelName, [System.StringComparison]::Ordinal) } |
+        # Case-insensitive, matching the de-duplication every model-selection path already applies.
+        $Expert.ReviewerNames = @($ExpertMap |
+                Where-Object { $_.ModelName -ne $Expert.ModelName } |
                 ForEach-Object { $_.ReviewerName })
-
-        if ($PeerReviewers.Count -gt 0)
-        {
-            $Expert.ReviewerNames = $PeerReviewers
-        }
-        else
-        {
-            $Expert.ReviewerNames = @($Expert.ReviewerName)
-        }
     }
     else
     {
@@ -3640,6 +3806,7 @@ foreach ($Expert in $ExpertMap)
             ExpectedModel = $Expert.ModelName
             ExpectedUserInvocable = $false
             ExpectedDisableModelInvocation = $false
+            ExpectedTools = $ReviewerAgentTools
             ExpectedAgents = @()
             MustNotDelegate = $true
             MustNotSelfReview = $false
@@ -3664,6 +3831,7 @@ foreach ($Expert in $ExpertMap)
             ExpectedModel = $Expert.ModelName
             ExpectedUserInvocable = $false
             ExpectedDisableModelInvocation = $false
+            ExpectedTools = $ExpertAgentTools
             ExpectedAgents = $Expert.ReviewerNames
             MustNotDelegate = $false
             MustNotSelfReview = $CrossModelReview
@@ -3683,26 +3851,17 @@ $GeneratedAgentFiles.Add([PSCustomObject]@{
         ExpectedModel = $ResolvedCoordinatorModel
         ExpectedUserInvocable = $true
         ExpectedDisableModelInvocation = $true
+        ExpectedTools = $CoordinatorAgentTools
         ExpectedAgents = @($ExpertMap | ForEach-Object { $_.ExpertName })
         MustNotDelegate = $false
         MustNotSelfReview = $false
     })
 
-# Validate a disposable copy before any live agent is backed up or replaced. This catches template
-# regressions while the previous installation is still completely intact.
-$PreflightDirectory = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-agent-preflight-$([guid]::NewGuid().ToString('N'))"
-
-try
+# Validate the exact content the live write will produce before any agent is backed up or replaced,
+# so a template regression is caught while the previous installation is still completely intact.
+foreach ($AgentFile in $GeneratedAgentFiles)
 {
-    foreach ($AgentFile in $GeneratedAgentFiles)
-    {
-        Write-Utf8File -Path (Join-Path -Path $PreflightDirectory -ChildPath $AgentFile.FileName) -Content $AgentFile.Content
-        Test-GeneratedAgentFile -Directory $PreflightDirectory -Record $AgentFile
-    }
-}
-finally
-{
-    Remove-Item -LiteralPath $PreflightDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Test-GeneratedAgentFile -Record $AgentFile
 }
 
 # Identify leftovers now, but do not remove them until every replacement has passed validation.
@@ -3770,6 +3929,11 @@ $AgentActivationCommitted = $true
 
 Write-Console 'All agent files passed post-install validation.'
 
+Remove-ExpiredBackup `
+    -BackupRoot (Split-Path -Path $BackupDirectory -Parent) `
+    -CurrentBackupDirectory $BackupDirectory `
+    -KeepCount $BackupRetentionCount
+
 Complete-InstallStep
 Complete-InstallProgress
 
@@ -3805,6 +3969,12 @@ if (-not $SkipVSCodeSetting)
 {
     Write-Output 'VS Code nested-subagent setting:'
     Write-Output '  chat.subagents.allowInvocationsFromSubagents = true'
+
+    if (-not $VSCodeSettingChanged)
+    {
+        Write-Output '  It was already enabled, so the settings file was left untouched.'
+    }
+
     Write-Output '  This enables nested subagents for every agent, not only this council.'
     Write-Output ''
 }
@@ -3918,7 +4088,7 @@ catch
         }
     }
 
-    if ($VSCodeSettingChanged -and -not $AgentActivationCommitted -and $null -ne $OriginalVSCodeSettingsState)
+    if ($VSCodeSettingWriteAttempted -and -not $AgentActivationCommitted -and $null -ne $OriginalVSCodeSettingsState)
     {
         try
         {

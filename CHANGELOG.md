@@ -5,6 +5,42 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.2
+
+### Fixed
+
+- **A failed installation could leave the VS Code setting enabled.** The settings editor writes the
+  file and then verifies it, but both verification failures threw before the function returned, so
+  the flag the rollback guard depended on stayed false and the setting was never restored. The guard
+  now keys on the snapshot captured before the write. A fault-injection run confirms the file is
+  restored byte for byte, and a negative control confirms the previous guard was not.
+- **Post-install validation never checked the generated tool list or the target.** `Test-AgentFile`
+  counted front matter keys but only inspected `tools` for the leaf-agent negative case, so a
+  tool-name regression could ship. Both values are now asserted for every role from one shared
+  constant, which also removes any chance of the generator and the assertion drifting apart.
+
+### Changed
+
+- **Unchanged agent files are no longer rewritten.** A repeated install compares raw bytes and skips
+  files that already match, so a no-op re-run creates no backups and leaves timestamps alone. The
+  comparison is byte-level on purpose, because a decoded string hides a byte order mark that must
+  never reach the front matter.
+- **The preflight no longer writes to a temporary directory.** It validates the exact content the
+  live write will produce in memory, removing a full write and read of every generated file while
+  keeping the guarantee that a template regression cannot touch the installed roster.
+- **The model-cache retry only fires on a genuine read failure.** Cached-model reads now return an
+  explicit result object, so a snapshot that read cleanly and simply held no agent-capable model no
+  longer triggers a second database copy or the misleading "unreadable" message.
+- **The roster is recovered from the coordinator's front matter.** Reuse previously depended on a
+  regex over one generated prose sentence, so rewording that sentence silently reset a
+  noninteractive re-run to the built-in defaults. The prose parser is retained as a fallback.
+- Backup folders beyond the newest ten are pruned after a successful install, and backing up a file
+  now logs one line instead of two.
+- `$MaxModelCount` is derived from the lens catalog instead of being repeated as a literal.
+- `-Models` now reports that the supplied names were never checked against the VS Code catalog.
+- Removed an unreachable single-model reviewer fallback and the stale comment justifying it.
+- The regression suite is now 27 tests on PowerShell 7 and Windows PowerShell 5.1.
+
 ## 5.7.1
 
 ### Changed

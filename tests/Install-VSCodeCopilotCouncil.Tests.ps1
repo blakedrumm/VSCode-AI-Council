@@ -28,6 +28,7 @@ BeforeAll {
         'ConvertFrom-ModelCacheJson',
         'Get-CachedModelRecord',
         'Get-VSCodeModelCatalog',
+        'Get-PreviousCouncilConfiguration',
         'Get-ModelFamily',
         'Get-ModelTierWeight',
         'Get-ModelVersion',
@@ -62,6 +63,29 @@ BeforeAll {
         }
 
         . ([scriptblock]::Create($FunctionAst.Extent.Text))
+    }
+
+    # The generators read these script-level constants, so the harness has to load the real values
+    # rather than restate them, or the tests would stop tracking the installer.
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'LensCatalog', 'MaxModelCount'))
+    {
+        $ConstantAst = $script:InstallerAst.Find(
+            {
+                param ($Node)
+
+                return $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $Node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $Node.Left.VariablePath.UserPath -eq $ConstantName
+            },
+            $true)
+
+        if ($null -eq $ConstantAst)
+        {
+            throw "Could not find constant in installer AST: $ConstantName"
+        }
+
+        . ([scriptblock]::Create($ConstantAst.Extent.Text))
+        Set-Variable -Name $ConstantName -Scope 'Script' -Value (Get-Variable -Name $ConstantName -ValueOnly)
     }
 }
 
@@ -157,12 +181,12 @@ Describe 'VS Code model-cache resilience' {
 
                 if ($script:CacheAttempts -eq 1)
                 {
-                    return @()
+                    return [PSCustomObject]@{ Succeeded = $false; Records = @() }
                 }
 
                 return [PSCustomObject]@{
-                    Name = 'Recovered Model'
-                    Category = 'powerful'
+                    Succeeded = $true
+                    Records = @([PSCustomObject]@{ Name = 'Recovered Model'; Category = 'powerful' })
                 }
             }
 
@@ -178,6 +202,84 @@ Describe 'VS Code model-cache resilience' {
             Remove-Variable CacheAttempts -Scope Script -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $CacheRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'does not retry a snapshot that read cleanly with no agent-capable model' {
+        $OriginalAppData = $env:APPDATA
+        $CacheRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-cache-$([guid]::NewGuid().ToString('N'))"
+
+        try
+        {
+            $env:APPDATA = $CacheRoot
+            $StateDirectory = Join-Path $CacheRoot 'Code\User\globalStorage'
+            New-Item -Path $StateDirectory -ItemType Directory -Force | Out-Null
+            New-Item -Path (Join-Path $StateDirectory 'state.vscdb') -ItemType File -Force | Out-Null
+            $script:CacheAttempts = 0
+
+            Mock Initialize-SqliteInterop { return $true }
+            Mock Get-CachedModelRecord {
+                $script:CacheAttempts++
+                return [PSCustomObject]@{ Succeeded = $true; Records = @() }
+            }
+
+            $Models = @(Get-VSCodeModelCatalog)
+
+            $script:CacheAttempts | Should -Be 1
+            $Models.Count | Should -Be 0
+        }
+        finally
+        {
+            $env:APPDATA = $OriginalAppData
+            Remove-Variable CacheAttempts -Scope Script -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $CacheRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Previous installation recovery' {
+    BeforeEach {
+        $script:RecoveryRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-recovery-$([guid]::NewGuid().ToString('N'))"
+        New-Item -Path $script:RecoveryRoot -ItemType Directory -Force | Out-Null
+        $script:CoordinatorFile = 'multi-model-engineering-council.agent.md'
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:RecoveryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'recovers the roster from front matter after the prose line is reworded' {
+        $ExpertMap = @(
+            [PSCustomObject]@{
+                ExpertName = 'Claude Opus 5 Expert'
+                ModelName = 'Claude Opus 5'
+                LensTitle = 'Implementation and correctness'
+                ReviewerNames = @('Grok 4.5 Reviewer')
+            },
+            [PSCustomObject]@{
+                ExpertName = 'Grok 4.5 Expert'
+                ModelName = 'Grok 4.5'
+                LensTitle = 'Architecture and maintainability'
+                ReviewerNames = @('Claude Opus 5 Reviewer')
+            }
+        )
+
+        $Coordinator = New-CoordinatorAgentContent `
+            -AgentName 'Multi-Model Engineering Council' `
+            -ModelName 'Claude Opus 5' `
+            -ExpertMap $ExpertMap `
+            -CrossModelReview $true
+
+        $Reworded = $Coordinator -replace '(?m)^- (.+) Expert running .+$', '- $1 Expert, lens withheld'
+        $Reworded | Should -Not -Match 'Expert running'
+
+        Write-Utf8File -Path (Join-Path $script:RecoveryRoot $script:CoordinatorFile) -Content $Reworded
+
+        $Recovered = Get-PreviousCouncilConfiguration `
+            -AgentDirectory $script:RecoveryRoot `
+            -CoordinatorFileName $script:CoordinatorFile
+
+        $Recovered.Models | Should -Be @('Claude Opus 5', 'Grok 4.5')
+        $Recovered.CoordinatorModel | Should -Be 'Claude Opus 5'
     }
 }
 
@@ -236,6 +338,27 @@ Describe 'Generated agent policy' {
         $Coordinator | Should -Match "tools: \['agent', 'read', 'search', 'edit', 'execute', 'web', 'todo'\]"
         $Coordinator | Should -Match 'Use REQUIRED for both cross-model Tier 3 branches and every Tier 5 branch.'
         $Coordinator | Should -Match 'up to 2 parallel expert calls plus 2 leaf-reviewer calls'
+    }
+
+    It 'rejects an agent whose tool list drifted from the expectation' {
+        $Reviewer = New-ReviewerAgentContent `
+            -AgentName 'GPT-5.6 Sol Reviewer' `
+            -ModelName 'GPT-5.6 Sol'
+
+        $Record = [PSCustomObject]@{
+            FileName = 'mm-reviewer-drift.agent.md'
+            Content = $Reviewer -replace "tools: \['read', 'search', 'web'\]", "tools: ['read', 'search', 'web', 'execute']"
+            ExpectedName = 'GPT-5.6 Sol Reviewer'
+            ExpectedModel = 'GPT-5.6 Sol'
+            ExpectedUserInvocable = $false
+            ExpectedDisableModelInvocation = $false
+            ExpectedTools = $script:ReviewerAgentTools
+            ExpectedAgents = @()
+            MustNotDelegate = $true
+            MustNotSelfReview = $false
+        }
+
+        { Test-GeneratedAgentFile -Record $Record } | Should -Throw '*Expected tool list*'
     }
 }
 
@@ -341,5 +464,39 @@ Describe 'End-to-end workspace install' {
         $Coordinator | Should -Match '(?m)^disable-model-invocation: true\r?$'
         $Coordinator | Should -Match 'up to 2 parallel expert calls plus 2 leaf-reviewer calls'
         $Coordinator | Should -Match ([regex]::Escape($UnicodeModel))
+    }
+
+    It 'leaves unchanged agent files untouched on a repeated install' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Before = @{}
+
+        foreach ($AgentFile in @(Get-ChildItem -LiteralPath $AgentDirectory -Filter '*.agent.md' -File))
+        {
+            $Before[$AgentFile.Name] = $AgentFile.LastWriteTimeUtc
+        }
+
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $After = @(Get-ChildItem -LiteralPath $AgentDirectory -Filter '*.agent.md' -File)
+        $After.Count | Should -Be $Before.Count
+
+        foreach ($AgentFile in $After)
+        {
+            $AgentFile.LastWriteTimeUtc | Should -Be $Before[$AgentFile.Name]
+        }
     }
 }
