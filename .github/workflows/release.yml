@@ -1,0 +1,468 @@
+name: Release Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, branch, or tag to package
+        required: true
+        default: main
+        type: string
+      version:
+        description: Release version override; blank reads Install-VSCodeCopilotCouncil-v5.ps1 (leading v optional)
+        required: false
+        type: string
+      additions:
+        description: Release additions, one item per line; bullet prefixes are optional
+        required: false
+        type: string
+      upload_sftp:
+        description: Upload the .ps1 and .txt to the configured SFTP server
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: true
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit, branch, or tag to package
+        required: true
+        type: string
+      version:
+        description: Release version override; blank reads Install-VSCodeCopilotCouncil-v5.ps1 (leading v optional)
+        required: false
+        type: string
+      additions:
+        description: Release additions, one item per line
+        required: false
+        type: string
+      upload_sftp:
+        description: Upload the .ps1 and .txt to SFTP
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SFTP_HOST:
+        required: false
+      SFTP_PORT:
+        required: false
+      SFTP_USERNAME:
+        required: false
+      SFTP_PRIVATE_KEY:
+        required: false
+      SFTP_KNOWN_HOSTS:
+        required: false
+      SFTP_REMOTE_DIRECTORY:
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: VSCode-AI-Council-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+    permissions:
+      contents: write   # gh release create/edit/upload only; no other step needs write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+          # This job executes the packaged installer; do not leave a usable push credential in
+          # .git/config where that code could reach it.
+          persist-credentials: false
+
+      - name: Prepare release metadata
+        id: metadata
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scriptContent = Get-Content -LiteralPath 'Install-VSCodeCopilotCouncil-v5.ps1' -Raw
+
+          # The constant is what the installer's own update check reads, so it is authoritative.
+          $constantMatch = [regex]::Match($scriptContent, '\$ScriptVersion\s*=\s*''(?<Version>[0-9]+(?:\.[0-9]+){1,3})''')
+          if (-not $constantMatch.Success) {
+            throw 'Unable to read $ScriptVersion from Install-VSCodeCopilotCouncil-v5.ps1.'
+          }
+          $scriptVersion = $constantMatch.Groups['Version'].Value
+
+          # A stale .NOTES entry would mislead anyone reading the file rather than running it.
+          $notesMatch = [regex]::Match($scriptContent, 'Version:\s*\r?\n\s*(?<Version>[0-9]+(?:\.[0-9]+){1,3})')
+          if (-not $notesMatch.Success) {
+            throw 'Unable to read the Version entry from the .NOTES help block.'
+          }
+          if ($notesMatch.Groups['Version'].Value -ne $scriptVersion) {
+            throw "The .NOTES version '$($notesMatch.Groups['Version'].Value)' does not match `$ScriptVersion '$scriptVersion'."
+          }
+
+          $versionPattern = '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$'
+          if ($scriptVersion -notmatch $versionPattern) {
+            throw "Script version '$scriptVersion' is not a supported semantic version."
+          }
+
+          $requestedVersion = ([string]$env:REQUESTED_VERSION).Trim()
+          if ($requestedVersion -match '^[vV](?=\d)') {
+            $requestedVersion = $requestedVersion.Substring(1)
+          }
+          $releaseVersion = if ($requestedVersion) { $requestedVersion } else { $scriptVersion }
+          if ($releaseVersion -notmatch $versionPattern) {
+            throw "Release version '$releaseVersion' is not a supported semantic version."
+          }
+          $versionSource = if ($requestedVersion) { 'workflow input' } else { 'Install-VSCodeCopilotCouncil-v5.ps1' }
+          if ($requestedVersion -and $releaseVersion -ne $scriptVersion) {
+            Write-Warning "Release version '$releaseVersion' overrides the script version '$scriptVersion'. The committed script will not be rewritten, so its update check will report '$scriptVersion'."
+          }
+
+          $releaseCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $releaseCommit) {
+            throw 'Unable to resolve the checked-out release commit.'
+          }
+
+          # The ref input is operator-supplied and the later steps execute the installer in the same
+          # job that holds the SFTP deploy key, so only code already merged to main may be released.
+          & git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to fetch origin/main to verify the release commit.'
+          }
+          & git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release commit '$releaseCommit' is not reachable from origin/main. Merge it before releasing."
+          }
+
+          "version=$releaseVersion" >> $env:GITHUB_OUTPUT
+          "tag=v$releaseVersion" >> $env:GITHUB_OUTPUT
+          "commit=$releaseCommit" >> $env:GITHUB_OUTPUT
+
+          @"
+          ## Release metadata
+
+          - Release version: ``$releaseVersion``
+          - Version source: $versionSource
+          - Script version: ``$scriptVersion``
+          - Tag: ``v$releaseVersion``
+          - Commit: ``$releaseCommit``
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Validate the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scriptPath = (Resolve-Path -LiteralPath 'Install-VSCodeCopilotCouncil-v5.ps1').Path
+
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) {
+            foreach ($parseError in $parseErrors) {
+              Write-Host "::error file=Install-VSCodeCopilotCouncil-v5.ps1,line=$($parseError.Extent.StartLineNumber)::$($parseError.Message)"
+            }
+            throw "The installer has $($parseErrors.Count) parse error(s)."
+          }
+
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+          $findings = Invoke-ScriptAnalyzer -Path $scriptPath -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
+          if ($findings) {
+            foreach ($finding in $findings) {
+              Write-Host "::error file=Install-VSCodeCopilotCouncil-v5.ps1,line=$($finding.Line)::$($finding.RuleName) - $($finding.Message)"
+            }
+            throw 'PSScriptAnalyzer reported errors or warnings.'
+          }
+
+          # Generating the agents is the only thing that exercises Test-AgentFile, which is the
+          # installer's sole correctness net. -SkipVSCodeSetting keeps it away from any real
+          # settings.json on the runner.
+          $workspace = Join-Path $env:RUNNER_TEMP "council-release-validation-$([guid]::NewGuid().ToString('N'))"
+          $null = New-Item -Path $workspace -ItemType Directory -Force
+          & $scriptPath -Scope Workspace -WorkspacePath $workspace -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting -Models 'Claude Opus 5', 'Gemini 3.1 Pro (Preview)', 'GPT-5.6 Sol'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The installer failed its non-interactive validation run.'
+          }
+
+          $agentDirectory = Join-Path $workspace '.github/agents'
+          $agentFiles = @(Get-ChildItem -LiteralPath $agentDirectory -Filter '*.agent.md' -File)
+          if ($agentFiles.Count -ne 7) {
+            throw "Expected 7 generated agent files for three models, found $($agentFiles.Count)."
+          }
+
+          foreach ($agentFile in $agentFiles) {
+            $body = Get-Content -LiteralPath $agentFile.FullName -Raw
+
+            # An unexpanded template variable or a stray backtick escape both produce a file that
+            # loads fine and simply misbehaves, so they are checked here rather than trusted.
+            $unexpanded = [regex]::Matches($body, '\$[A-Za-z_]\w+')
+            if ($unexpanded.Count -gt 0) {
+              throw "$($agentFile.Name) contains $($unexpanded.Count) unexpanded template variable(s), first is '$($unexpanded[0].Value)'."
+            }
+
+            $controlCharacters = [regex]::Matches($body, '[\x00-\x08\x0B\x0C\x0E-\x1F]')
+            if ($controlCharacters.Count -gt 0) {
+              throw "$($agentFile.Name) contains $($controlCharacters.Count) control character(s)."
+            }
+          }
+
+          Remove-Item -LiteralPath $workspace -Recurse -Force
+          Write-Host "Validation passed. $($agentFiles.Count) agent files generated and checked."
+
+      - name: Build release assets
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_COMMIT: ${{ steps.metadata.outputs.commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseRoot = Join-Path $env:RUNNER_TEMP 'VSCode-AI-Council-release'
+          if (Test-Path -LiteralPath $releaseRoot) {
+            Remove-Item -LiteralPath $releaseRoot -Recurse -Force
+          }
+          $null = New-Item -Path $releaseRoot -ItemType Directory -Force
+
+          # Taken from the commit rather than the working tree, so the published bytes are provably
+          # the reviewed ones even though an earlier step executed the installer on this runner.
+          $sourceArchive = Join-Path $env:RUNNER_TEMP 'release-source.zip'
+          $archiveArgument = "--output=$sourceArchive"
+          & git archive --format=zip $archiveArgument $env:RELEASE_COMMIT -- 'Install-VSCodeCopilotCouncil-v5.ps1'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sourceArchive -PathType Leaf)) {
+            throw 'Unable to archive Install-VSCodeCopilotCouncil-v5.ps1 from the release commit.'
+          }
+          Expand-Archive -LiteralPath $sourceArchive -DestinationPath $releaseRoot -Force
+          Remove-Item -LiteralPath $sourceArchive -Force
+
+          $scriptAsset = Join-Path $releaseRoot 'Install-VSCodeCopilotCouncil-v5.ps1'
+          $textAsset = Join-Path $releaseRoot 'Install-VSCodeCopilotCouncil-v5.txt'
+          if (-not (Test-Path -LiteralPath $scriptAsset -PathType Leaf)) {
+            throw 'The release commit did not contain Install-VSCodeCopilotCouncil-v5.ps1.'
+          }
+
+          # The .txt is generated here rather than committed, so it can never drift from the .ps1.
+          # It exists for downloaders whose mail gateway or proxy blocks a .ps1.
+          Copy-Item -LiteralPath $scriptAsset -Destination $textAsset -Force
+
+          $scriptHash = (Get-FileHash -LiteralPath $scriptAsset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $textHash = (Get-FileHash -LiteralPath $textAsset -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($scriptHash -ne $textHash) {
+            throw 'The .txt copy is not byte-identical to the .ps1.'
+          }
+
+          "script_path=$scriptAsset" >> $env:GITHUB_OUTPUT
+          "text_path=$textAsset" >> $env:GITHUB_OUTPUT
+          "script_sha256=$scriptHash" >> $env:GITHUB_OUTPUT
+          "text_sha256=$textHash" >> $env:GITHUB_OUTPUT
+
+          @"
+          - Asset SHA-256: ``$scriptHash`` (.ps1 and .txt are identical)
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Generate release notes
+        id: notes
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_ADDITIONS: ${{ inputs.additions }}
+          RELEASE_COMMIT: ${{ steps.metadata.outputs.commit }}
+          SCRIPT_SHA256: ${{ steps.package.outputs.script_sha256 }}
+          TEXT_SHA256: ${{ steps.package.outputs.text_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $notesPath = Join-Path $env:RUNNER_TEMP 'VSCode-AI-Council-release-notes.md'
+          & '.github/scripts/New-ReleaseNotes.ps1' `
+              -Version $env:RELEASE_VERSION `
+              -Repository $env:GITHUB_REPOSITORY `
+              -Additions ([string]$env:RELEASE_ADDITIONS) `
+              -Commit ([string]$env:RELEASE_COMMIT) `
+              -ScriptSha256 ([string]$env:SCRIPT_SHA256) `
+              -TextSha256 ([string]$env:TEXT_SHA256) `
+              -OutputPath $notesPath | Out-Null
+          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+
+      - name: Retain release assets as workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: VSCode-AI-Council-v${{ steps.metadata.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.script_path }}
+            ${{ steps.package.outputs.text_path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.metadata.outputs.commit }}
+          SCRIPT_PATH: ${{ steps.package.outputs.script_path }}
+          TEXT_PATH: ${{ steps.package.outputs.text_path }}
+          NOTES_PATH: ${{ steps.notes.outputs.notes_path }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command -Name gh -ErrorAction SilentlyContinue)) {
+            throw 'GitHub CLI is not available on the release runner.'
+          }
+
+          $null = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $isPrerelease = [Convert]::ToBoolean($env:PRERELEASE)
+          $releaseTitle = "v$env:RELEASE_VERSION"
+
+          $tagCommitOutput = @(& git rev-list -n 1 $env:RELEASE_TAG 2>$null)
+          $tagLookupSucceeded = $LASTEXITCODE -eq 0 -and $tagCommitOutput.Count -gt 0
+          $tagCommit = if ($tagLookupSucceeded) { ([string]$tagCommitOutput[0]).Trim() } else { '' }
+          if ($tagLookupSucceeded -and $tagCommit -and $tagCommit -ne $env:RELEASE_COMMIT) {
+            throw "Tag '$env:RELEASE_TAG' already points to '$tagCommit', not release commit '$env:RELEASE_COMMIT'. Bump `$ScriptVersion before publishing this commit."
+          }
+          # Fail closed: an existing release whose tag is not in this checkout means the guard above
+          # proved nothing, and the clobbering path below would overwrite an asset that may belong
+          # to a different commit.
+          if ($releaseExists -and -not $tagLookupSucceeded) {
+            throw "Release '$env:RELEASE_TAG' already exists but its tag is not present in this checkout, so it cannot be verified against release commit '$env:RELEASE_COMMIT'. Refusing to overwrite it."
+          }
+
+          if ($releaseExists) {
+            & gh release upload $env:RELEASE_TAG $env:SCRIPT_PATH $env:TEXT_PATH --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "Unable to replace the assets on release '$env:RELEASE_TAG'." }
+
+            $editArguments = @(
+              'release', 'edit', $env:RELEASE_TAG,
+              '--repo', $env:GITHUB_REPOSITORY,
+              '--title', $releaseTitle,
+              '--notes-file', $env:NOTES_PATH,
+              "--prerelease=$($isPrerelease.ToString().ToLowerInvariant())"
+            )
+            & gh @editArguments
+            if ($LASTEXITCODE -ne 0) { throw "Unable to update release '$env:RELEASE_TAG'." }
+          }
+          else {
+            $createArguments = @(
+              'release', 'create', $env:RELEASE_TAG, $env:SCRIPT_PATH, $env:TEXT_PATH,
+              '--repo', $env:GITHUB_REPOSITORY,
+              '--target', $env:RELEASE_COMMIT,
+              '--title', $releaseTitle,
+              '--notes-file', $env:NOTES_PATH
+            )
+            if ($isPrerelease) { $createArguments += '--prerelease' }
+            else { $createArguments += '--latest' }
+            & gh @createArguments
+            if ($LASTEXITCODE -ne 0) { throw "Unable to create release '$env:RELEASE_TAG'." }
+          }
+
+      - name: Upload release assets to SFTP
+        if: inputs.upload_sftp
+        shell: pwsh
+        env:
+          SCRIPT_PATH: ${{ steps.package.outputs.script_path }}
+          TEXT_PATH: ${{ steps.package.outputs.text_path }}
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_PORT: ${{ secrets.SFTP_PORT }}
+          SFTP_USERNAME: ${{ secrets.SFTP_USERNAME }}
+          SFTP_PRIVATE_KEY: ${{ secrets.SFTP_PRIVATE_KEY }}
+          SFTP_KNOWN_HOSTS: ${{ secrets.SFTP_KNOWN_HOSTS }}
+          SFTP_REMOTE_DIRECTORY: ${{ secrets.SFTP_REMOTE_DIRECTORY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requiredSecrets = [ordered]@{
+            SFTP_HOST        = $env:SFTP_HOST
+            SFTP_USERNAME    = $env:SFTP_USERNAME
+            SFTP_PRIVATE_KEY = $env:SFTP_PRIVATE_KEY
+            SFTP_KNOWN_HOSTS = $env:SFTP_KNOWN_HOSTS
+          }
+          $missingSecrets = @($requiredSecrets.Keys | Where-Object { [string]::IsNullOrWhiteSpace($requiredSecrets[$_]) })
+          if ($missingSecrets.Count -gt 0) {
+            throw "SFTP upload was requested, but these repository secrets are missing: $($missingSecrets -join ', ')."
+          }
+
+          # An unset secret is absent from the process environment on Windows, so every read below
+          # is coerced to a string before any method call.
+          $sftpPort = 22
+          $portText = ([string]$env:SFTP_PORT).Trim()
+          if ($portText) {
+            $parsedPort = 0
+            if (-not [int]::TryParse($portText, [ref]$parsedPort) -or $parsedPort -lt 1 -or $parsedPort -gt 65535) {
+              throw 'SFTP_PORT must be a number from 1 through 65535.'
+            }
+            $sftpPort = $parsedPort
+          }
+
+          $remoteDirectory = ([string]$env:SFTP_REMOTE_DIRECTORY)
+          if ($remoteDirectory -match '["\r\n]') {
+            throw 'SFTP_REMOTE_DIRECTORY cannot contain quotes or line breaks.'
+          }
+          $remoteDirectory = $remoteDirectory.Trim()
+
+          $sftpCommand = Get-Command -Name sftp.exe -ErrorAction SilentlyContinue
+          if (-not $sftpCommand) { throw 'OpenSSH sftp.exe is not available on the release runner.' }
+
+          $sftpRoot = Join-Path $env:RUNNER_TEMP "VSCode-AI-Council-sftp-$([guid]::NewGuid().ToString('N'))"
+          $keyPath = Join-Path $sftpRoot 'deploy_key'
+          $knownHostsPath = Join-Path $sftpRoot 'known_hosts'
+          $batchPath = Join-Path $sftpRoot 'upload.batch'
+          $null = New-Item -Path $sftpRoot -ItemType Directory -Force
+
+          try {
+            $utf8NoBom = [Text.UTF8Encoding]::new($false)
+            [IO.File]::WriteAllText($keyPath, ($env:SFTP_PRIVATE_KEY -replace "`r`n", "`n").TrimEnd() + "`n", $utf8NoBom)
+            [IO.File]::WriteAllText($knownHostsPath, ($env:SFTP_KNOWN_HOSTS -replace "`r`n", "`n").TrimEnd() + "`n", $utf8NoBom)
+
+            $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            # Delete is granted alongside read so the key removal below cannot be blocked by the
+            # very ACL that protects it.
+            $null = & icacls.exe $keyPath '/inheritance:r' '/grant:r' "$currentUser`:(R,D)"
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to restrict access to the temporary SFTP private key.' }
+
+            $batchLines = [Collections.Generic.List[string]]::new()
+
+            foreach ($localPath in @($env:SCRIPT_PATH, $env:TEXT_PATH)) {
+              $fileName = Split-Path -Path $localPath -Leaf
+              $remoteFile = if ([string]::IsNullOrWhiteSpace($remoteDirectory)) {
+                $fileName
+              }
+              elseif ($remoteDirectory -eq '/') {
+                "/$fileName"
+              }
+              else {
+                "$($remoteDirectory.TrimEnd('/'))/$fileName"
+              }
+              $localFile = $localPath.Replace('\', '/')
+              $batchLines.Add("put `"$localFile`" `"$remoteFile`"")
+            }
+
+            [IO.File]::WriteAllText($batchPath, (($batchLines -join "`n") + "`n"), $utf8NoBom)
+
+            $sftpArguments = @(
+              '-b', $batchPath,
+              '-i', $keyPath,
+              '-o', "UserKnownHostsFile=$knownHostsPath",
+              '-o', "GlobalKnownHostsFile=$knownHostsPath",
+              '-o', 'StrictHostKeyChecking=yes',
+              '-o', 'BatchMode=yes',
+              '-o', 'IdentitiesOnly=yes',
+              '-P', [string]$sftpPort,
+              "$env:SFTP_USERNAME@$env:SFTP_HOST"
+            )
+            & $sftpCommand.Source @sftpArguments
+            if ($LASTEXITCODE -ne 0) { throw 'SFTP upload failed.' }
+
+            Write-Host "Uploaded $($batchLines.Count) file(s) to the SFTP server."
+          }
+          finally {
+            Remove-Item -LiteralPath $sftpRoot -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $sftpRoot) {
+              Write-Output "::warning::Unable to delete '$sftpRoot'; the temporary SFTP private key may still be on this runner."
+            }
+          }
