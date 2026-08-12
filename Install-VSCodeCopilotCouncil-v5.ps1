@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.8
+        5.7.9
 
     Compatible with:
         Windows PowerShell 5.1
@@ -317,7 +317,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.8'
+$ScriptVersion = '5.7.9'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -447,6 +447,44 @@ function Write-Console
             Write-Host $Line
         }
     }
+}
+
+# Single-quoted so the # and the spacing survive verbatim; an expandable here-string would not
+# change this art, but the next person to edit it should not have to check.
+function Write-InstallBanner
+{
+    $Banner = @'
+##     ##  ######   ######   #######  ########  ########
+##     ## ##    ## ##    ## ##     ## ##     ## ##
+##     ## ##       ##       ##     ## ##     ## ##
+ ##   ##   ######  ##       ##     ## ##     ## ######
+  ## ##         ## ##       ##     ## ##     ## ##
+   ###    ##    ## ##    ## ##     ## ##     ## ##
+    #      ######   ######   #######  ########  ########
+     ##     ##     ##     ##     ##     ##     ##     ##
+
+                       ###    ####
+                      ## ##    ##
+                     ##   ##   ##
+                    ##     ##  ##
+                    #########  ##
+                    ##     ##  ##
+                    ##     ## ####
+                     ##     ##  ##
+
+ ######   #######  ##     ## ##    ##  ######  #### ##
+##    ## ##     ## ##     ## ###   ## ##    ##  ##  ##
+##       ##     ## ##     ## ####  ## ##        ##  ##
+##       ##     ## ##     ## ## ## ##  ######   ##  ##
+##       ##     ## ##     ## ##  ####       ##  ##  ##
+##    ## ##     ## ##     ## ##   ### ##    ##  ##  ##
+ ######   #######   #######  ##    ##  ######  #### ########
+  ##     ##     ##     ##     ##     ##     ##     ##     ##
+'@
+
+    Write-Host ''
+    Write-Host $Banner -ForegroundColor Cyan
+    Write-Host ''
 }
 
 # Renders a duration at a sensible precision. Sub-second steps read better in milliseconds than
@@ -3679,6 +3717,7 @@ $ResolvedVSCodeSettingsPath = $null
 
 try
 {
+    Write-InstallBanner
     Write-Console 'Starting adaptive multi-model Copilot council installation.'
 
 # Step 1. Compare this copy against the published one. Purely informational, and every failure

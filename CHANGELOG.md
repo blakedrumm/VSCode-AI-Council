@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.9
+
+### Added
+
+- An ASCII banner reading VSCODE AI COUNCIL is printed at the top of an install run, so it is
+  obvious at a glance which script is running and when its output starts.
+
 ## 5.7.8
 
 5.7.7 taught the council to tell proof from belief. This release fixes the remaining findings from
