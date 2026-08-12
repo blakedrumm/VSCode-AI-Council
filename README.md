@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.10.0-blue" alt="Version 5.10.0">
+  <img src="https://img.shields.io/badge/version-5.11.0-blue" alt="Version 5.11.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -203,6 +203,8 @@ Then set `chat.subagents.allowInvocationsFromSubagents` back to `false` if you w
 Tier 4 runs up to five frontier models in parallel, and a selected nested review can double a branch. Tier 5 intentionally runs one reviewer behind every expert, so a five-model Tier 5 run can use ten model calls and return a large synthesis. That is precisely why the tier gating exists, and why the coordinator is instructed to start at the lowest tier that can answer correctly. In practice most requests cost zero or one expert call.
 
 Hover a subagent section in the chat response to see the AI credits it used.
+
+The other half of the cost is context, and it is easy to miss because nothing bills you for it directly. Everything attached to the request is re-sent on every turn, so a large file left selected in the editor, or pinned as context, is paid for again each time you send a message and again inside every expert the coordinator dispatches. If a long session starts feeling slow or expensive, deselect large files and start a fresh conversation for a new task.
 
 ## License
 

@@ -5,6 +5,49 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.11.0
+
+Clears the findings 5.10.0 deferred. Each one was held back for blast radius rather than doubt, so
+this release works through them and states plainly which one was rejected on evidence instead.
+
+### Fixed
+
+- No lens named durable data, schema, or stored state, so nothing in the roster was primed to ask
+  whether a change destroys data on rollback. A change can be correct, secure, and fast and still
+  do that. The risk now has exactly one owner, in the testing and regression lens, alongside the
+  ordering and idempotency concerns it belongs with.
+- Nothing owned personal data handling either. It now sits in the security lens, which already held
+  credentials but said nothing about retention or what ends up in logs.
+- The evidence list ranked classes of evidence with repository source above a test run, while the
+  section directly above it said an empirical claim stays provisional until you run it. For a claim
+  about runtime behavior the list contradicted the rule. A shared note now ranks the evidence
+  against the claim, so an observed run outranks the reading that predicted it.
+- The Tier 2 trigger ended its first bullet with "and" over a second bullet containing "or", which
+  reads as either A and (B or C) or as (A and B) or C. The second reading fires a two-expert tier on
+  a single-lens task. It now states that both conditions must hold.
+
+### Added
+
+- A coverage preflight. Lenses are fixed at install time, so a fully staffed roster can still have
+  nobody assigned to the risk a given change carries. The coordinator now names the risk classes in
+  play before dispatching, assigns any unowned one to the closest expert explicitly, and says in the
+  announcement who received it.
+- Tier 2 now says what to do when its two reports disagree, rather than leaving that only in the
+  Tier 3 trigger further down the page.
+- The README explains the half of the cost that is not billed per call: attached context is re-sent
+  every turn and again inside every dispatched expert, so a large selected file is paid for
+  repeatedly.
+
+### Rejected
+
+- Decoupling the model cap from the lens count. One lens per model is deliberate, since two experts
+  sharing a lens would receive the same brief, which the coordinator is already told to collapse.
+  The hand-copied `ValidateCount` bound cannot drift from the catalog either, because a test has
+  pinned it to `$LensCatalog.Count` since it was introduced.
+- Assigning lenses at run time. The fixed catalog is what lets the agent files be static and gives
+  each model a stable specialization. The coverage preflight delivers the same benefit, since the
+  coordinator can hand an unowned risk to a named expert without rewriting the roster.
+
 ## 5.10.0
 
 A Tier 5 review aimed at the two roles that had never been reviewed on their own terms: the reviewer

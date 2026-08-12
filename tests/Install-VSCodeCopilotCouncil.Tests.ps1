@@ -75,7 +75,7 @@ BeforeAll {
 
     # The generators read these script-level constants, so the harness has to load the real values
     # rather than restate them, or the tests would stop tracking the installer.
-    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount'))
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount'))
     {
         $ConstantAst = $script:InstallerAst.Find(
             {
@@ -1557,6 +1557,99 @@ Describe 'End-to-end workspace install' {
         # Experts never see each other, so Tier 3 is adjudicated, not a debate between them.
         $Coordinator | Should -Match 'two independent analyses that you adjudicate'
         $Coordinator | Should -Match 'only adversarial element inside a branch'
+    }
+
+    It 'gives the risk classes no lens used to name exactly one owner' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Gemini 3.1 Pro (Preview)', 'GPT-5.6 Sol', 'GPT-5.3-Codex', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $ExpertFiles = Get-ChildItem -Path (Join-Path $AgentDirectory 'mm-expert-*.agent.md')
+
+        # A change can be correct, secure, and fast and still destroy data on rollback. Exactly one
+        # owner, because two experts holding the same risk is the duplicate-brief waste.
+        $Owning = @($ExpertFiles | Where-Object { (Read-Utf8File -Path $_.FullName) -match 'durable data, schema, and stored-state integrity' })
+        $Owning.Count | Should -Be 1
+
+        $Privacy = @($ExpertFiles | Where-Object { (Read-Utf8File -Path $_.FullName) -match 'personal data handling, retention, and exposure in logs' })
+        $Privacy.Count | Should -Be 1
+    }
+
+    It 'ranks evidence against the claim instead of by class alone' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Files = @(
+            (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md'),
+            (Join-Path $AgentDirectory 'mm-expert-grok-4-5.agent.md'),
+            (Join-Path $AgentDirectory 'mm-reviewer-grok-4-5.agent.md')
+        )
+
+        # A bare class ranking says source outranks a test run even when the claim is about what
+        # happens at runtime, which contradicts the rule that an empirical claim has to be run.
+        foreach ($File in $Files)
+        {
+            $Content = Read-Utf8File -Path $File
+
+            $Content | Should -Match 'It does not rank them for every question'
+            $Content | Should -Match 'an observed run outranks the reading that predicted it'
+            $Content | Should -Match 'a different build, branch, or configuration'
+        }
+    }
+
+    It 'states the Tier 2 trigger without an ambiguous conjunction' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # A trailing 'and' over a bullet that itself contains 'or' reads as either A and (B or C)
+        # or (A and B) or C, and the second reading fires Tier 2 on a single-lens task.
+        $Coordinator | Should -Match 'Use when both of these are true:'
+        $Coordinator | Should -Not -Match 'the task spans two lenses, and'
+        $Coordinator | Should -Match 'either there is a real design or implementation choice to make'
+
+        # The tier that most often runs had no assertions on its own mechanics.
+        $Coordinator | Should -Match '(?s)### Tier 2 - Two experts in parallel.*?Cost: two parallel expert calls'
+        $Coordinator | Should -Match '(?s)### Tier 2 - Two experts in parallel.*?Include NESTED REVIEW: SKIP in both delegation briefs'
+        $Coordinator | Should -Match 'that is the Tier 3 trigger. Escalate rather than adopting the better-argued report'
+    }
+
+    It 'checks risk coverage before it spends anything' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # Lenses are fixed at install time, so a roster can be fully staffed and still have nobody
+        # assigned to the risk the change actually carries.
+        $Coordinator | Should -Match '(?m)^### Cover the risk, not just the lens\r?$'
+        $Coordinator | Should -Match 'a risk that no configured lens names is a risk nobody is primed to look for'
+        $Coordinator | Should -Match 'still destroy data on rollback'
+        $Coordinator | Should -Match "Assign an unowned risk explicitly in the closest expert's brief"
     }
 
     It 'keeps the single-model debate fallback honest' {
