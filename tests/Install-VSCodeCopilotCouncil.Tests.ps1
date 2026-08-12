@@ -134,18 +134,27 @@ Describe 'Model input and recommendation' {
         @{ Candidate = 'Model ' }
         @{ Candidate = ('A' * 101) }
         @{ Candidate = 'Model: injected' }
-        @{ Candidate = "Model$([char]0x200F)Name" }
-        @{ Candidate = "Model$([char]0x2028)Name" }
-        @{ Candidate = "Model$([char]0x2029)Name" }
-        @{ Candidate = "Model$([char]0x007F)Name" }
-        @{ Candidate = "Model$([char]0x0080)Name" }
-        @{ Candidate = "Model$([char]0x009F)Name" }
-        @{ Candidate = "Model$([char]0xFFFE)Name" }
-        @{ Candidate = "Model$([char]0xFFFF)Name" }
     ) {
         param ($Candidate)
 
         Test-ModelName -Name $Candidate | Should -BeFalse
+    }
+
+    # Driven by code point rather than by a literal, because several of these characters cannot be
+    # written into the XML report that Pester produces under -CI.
+    It 'rejects a model name containing <Label>' -TestCases @(
+        @{ Label = 'a right-to-left mark'; CodePoint = 0x200F }
+        @{ Label = 'a line separator'; CodePoint = 0x2028 }
+        @{ Label = 'a paragraph separator'; CodePoint = 0x2029 }
+        @{ Label = 'DEL'; CodePoint = 0x007F }
+        @{ Label = 'the first C1 control'; CodePoint = 0x0080 }
+        @{ Label = 'the last C1 control'; CodePoint = 0x009F }
+        @{ Label = 'the noncharacter U+FFFE'; CodePoint = 0xFFFE }
+        @{ Label = 'the noncharacter U+FFFF'; CodePoint = 0xFFFF }
+    ) {
+        param ($CodePoint)
+
+        Test-ModelName -Name "Model$([char]$CodePoint)Name" | Should -BeFalse
     }
 
     It 'fails closed when a version number overflows Int32' {
