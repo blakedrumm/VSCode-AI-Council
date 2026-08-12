@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.11.0-blue" alt="Version 5.11.0">
+  <img src="https://img.shields.io/badge/version-5.12.0-blue" alt="Version 5.12.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -134,6 +134,14 @@ If you steer the coordinator mid run, it classifies the interruption instead of 
 The run is tracked as a todo list that survives the interruption, and results already in the transcript are reused rather than re-dispatched.
 
 If you would rather a run finish before your next message is processed, choose **Add to Queue** from the Send dropdown, or set `chat.requestQueuing.defaultAction` to `queue`.
+
+## Editing your code
+
+The coordinator is the only agent with edit and terminal access. Experts and reviewers can read, search, and browse, so a finding always has to pass through the coordinator before anything on disk changes.
+
+When it does change code, it matches the conventions already in the file rather than its own defaults, and it treats a rule stated in a linter config, an editorconfig, or a contributing guide as outranking its preference.
+
+It never deletes code it believes is unused as part of another change. Removal is treated as its own separate step and it asks you first, because a symbol can be reached by reflection, dependency injection, an exported API, a build script, or a feature flag without any text search finding it. Unexporting, privatizing, dropping a registration, or letting a formatter strip something all count as removal for this purpose. When it does ask, it names the symbol, says where it searched, says which of those vectors it could not rule out, and lets you approve candidates one at a time.
 
 ## Update checking
 

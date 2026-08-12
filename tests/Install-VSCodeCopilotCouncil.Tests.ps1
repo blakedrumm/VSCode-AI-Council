@@ -1652,6 +1652,69 @@ Describe 'End-to-end workspace install' {
         $Coordinator | Should -Match "Assign an unowned risk explicitly in the closest expert's brief"
     }
 
+    It 'gates removing code behind the user rather than the agent' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-grok-4-5.agent.md')
+
+        $Coordinator | Should -Match '(?m)^### Removing code\r?$'
+        $Coordinator | Should -Match 'Never remove code as part of a change you were asked to make for another reason'
+
+        # The likeliest evasion is not deleting the text. Unexporting or letting a fixer strip it
+        # reaches the same end while leaving the rule technically obeyed.
+        $Coordinator | Should -Match 'Removal is more than deletion'
+        $Coordinator | Should -Match 'letting a formatter, fixer, or codemod strip it on your behalf'
+        $Coordinator | Should -Match 'reachable before your change is unreachable after it'
+
+        # Orphaning a symbol yourself proves nothing about callers outside the repository.
+        $Coordinator | Should -Match 'even when your own edit is what orphaned it'
+        $Coordinator | Should -Match 'not permission to delete it'
+
+        # Grep cannot see these, so the analysis step has to name them.
+        $Coordinator | Should -Match 'invocation by name from a string'
+        $Coordinator | Should -Match 'dependency injection, plugin discovery'
+        $Coordinator | Should -Match 'consumers outside this repository'
+        $Coordinator | Should -Match 'imports kept only for a side effect'
+
+        # A bundled yes is not consent, and 'unused' overstates what a search establishes.
+        $Coordinator | Should -Match '"unused" is a claim you are rarely entitled to'
+        $Coordinator | Should -Match 'Let the user take them one at a time'
+        $Coordinator | Should -Match 'is not a question anyone can answer safely'
+
+        # Experts cannot edit, so the hole is a deletion riding inside a proposal.
+        $Expert | Should -Match 'Never fold a removal into a change you propose'
+    }
+
+    It 'holds a change to the conventions of the code it edits' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # A generic best-practice list is inert for a frontier model. What it does not already know
+        # is this repository's conventions, so that is the only part worth spending words on.
+        $Coordinator | Should -Match 'Match the conventions of the code you are editing rather than your own defaults'
+        $Coordinator | Should -Match 'that rule outranks your preference'
+        $Coordinator | Should -Match 'no debugging scaffolding, commented-out code, or stub that silently does nothing'
+
+        # Rejected a recommendation to cut this as redundant with the bullet above it.
+        $Coordinator | Should -Match 'A passing test proves nothing until you have seen it fail for the right reason'
+    }
+
     It 'keeps the single-model debate fallback honest' {
         & $script:InstallerPath `
             -Scope Workspace `

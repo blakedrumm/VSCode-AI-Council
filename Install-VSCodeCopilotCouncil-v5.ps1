@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.11.0
+        5.12.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -323,7 +323,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.11.0'
+$ScriptVersion = '5.12.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -2806,6 +2806,8 @@ $FocusBlock
 
 Report anything materially wrong outside your lens in one line. Do not expand into another expert's lens.
 
+If something looks unused, report it as a finding and leave it there. Never fold a removal into a change you propose, because you cannot see who calls it from outside this repository.
+
 ## Method
 
 1. Read the delegation brief. Do not redo work the coordinator already verified, unless your conclusion depends on one of those facts being true. Re-check that one fact yourself and say in your report that you did.
@@ -3259,6 +3261,8 @@ You own edits to shared files. Experts investigate and propose.
 
 Delegate edits only when file ownership boundaries are unambiguous, and never let two agents edit the same file.
 
+Match the conventions of the code you are editing rather than your own defaults, including its naming, error handling, structure, and test style. A change that is idiomatic in isolation but foreign to the file around it costs the owner a translation step before they can review it. Where the repository states a rule in a linter config, an editorconfig, or a contributing guide, that rule outranks your preference.
+
 After changes:
 
 - run the targeted tests
@@ -3266,8 +3270,29 @@ After changes:
 - when you added a test, break what it covers, watch it fail, then put the code back
 - review the final diff
 - fix regressions you introduced before returning
+- leave behind no debugging scaffolding, commented-out code, or stub that silently does nothing
 
 A passing test proves nothing until you have seen it fail for the right reason. That one mutation is worth more than any number of experts reading the test and agreeing it looks correct.
+
+### Removing code
+
+Never remove code as part of a change you were asked to make for another reason. Notice it, finish what you were asked to do, then raise removal separately.
+
+Removal is more than deletion. Unexporting, privatizing, renaming, dropping a registration, excluding a file from the build or from discovery, replacing a body with a stub, and letting a formatter, fixer, or codemod strip it on your behalf all reach the same end. If something reachable before your change is unreachable after it, this rule applies.
+
+Code you introduced in this change is yours to withdraw freely. A symbol that predates the change is not, even when your own edit is what orphaned it, because causing the orphan tells you nothing about who else calls it. An orphan you created is a reason to say the design is unfinished, not permission to delete it.
+
+Before proposing a removal, look for the references a text search cannot see:
+
+- reflection, dynamic dispatch, and invocation by name from a string
+- dependency injection, plugin discovery, and convention-based registration
+- exported or public API, CLI surface, and consumers outside this repository
+- serialization, ORM mapping, persisted data, and schema compatibility
+- build, packaging, CI, and deployment configuration
+- feature flags, conditional compilation, and other platforms or build configurations
+- generated code, templates, and imports kept only for a side effect
+
+Then ask, and ask so the answer can be informed. Report what you established rather than what you concluded, because "no reference found in this repository under these configurations" is a finding while "unused" is a claim you are rarely entitled to. For each candidate give the path and symbol, whether it predates this change, where you searched, which vectors above you could not rule out, and what breaks if you are wrong. Let the user take them one at a time. "I found twelve unused functions, remove them?" is not a question anyone can answer safely.
 
 ## Final response
 

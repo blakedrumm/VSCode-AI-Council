@@ -5,6 +5,46 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.12.0
+
+Nothing in any generated prompt mentioned dead code, unused symbols, or leftovers before this
+release. Verified by search across all 14 generated files: zero occurrences.
+
+### Added
+
+- A removal gate in the coordinator. It never deletes code it believes is unused as part of a change
+  it was asked to make for another reason. It finishes the task, then raises removal separately and
+  asks first.
+- Removal is defined by effect rather than by the word delete, because the likeliest evasion is not
+  deleting any text. Unexporting, privatizing, renaming, dropping a registration, excluding a file
+  from the build or from discovery, replacing a body with a stub, and letting a formatter or codemod
+  strip it all count. If something reachable before the change is unreachable after it, the gate
+  applies.
+- A named list of the references a text search cannot see: reflection and invocation by name from a
+  string, dependency injection and plugin discovery, exported API and consumers outside the
+  repository, serialization and schema compatibility, build and CI configuration, feature flags and
+  other build configurations, and imports kept only for a side effect.
+- The self-orphaned case is gated too. Code introduced by the current change can be withdrawn
+  freely, but a symbol that predates the change stays protected even when the agent's own edit is
+  what orphaned it, because causing the orphan says nothing about external callers.
+- The question put to the user has required content, so consent can be informed. Path and symbol,
+  whether it predates the change, where the search ran, which vectors could not be ruled out, and
+  what breaks if the analysis is wrong. Candidates are approved one at a time, since a bundled
+  "remove these twelve?" cannot be answered safely.
+- One line in the expert prompt. Experts have no edit tool, so the way a deletion reaches disk is
+  inside a proposal the coordinator then applies. They now report a suspected unused symbol as a
+  finding instead of folding a removal into a proposed change.
+
+### Changed
+
+- Code changes are now held to the conventions of the file being edited rather than the model's own
+  defaults, and a rule stated in a linter config, an editorconfig, or a contributing guide outranks
+  the model's preference. A generic best-practice checklist was deliberately not added, because a
+  frontier model already carries that and the words would dilute the rules around it. What it does
+  not carry is the conventions of the repository in front of it.
+- Finishing a change now includes leaving behind no debugging scaffolding, commented-out code, or
+  stub that silently does nothing.
+
 ## 5.11.0
 
 Clears the findings 5.10.0 deferred. Each one was held back for blast radius rather than doubt, so
