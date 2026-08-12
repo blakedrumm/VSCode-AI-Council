@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.5
+        5.7.6
 
     Compatible with:
         Windows PowerShell 5.1
@@ -317,7 +317,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.5'
+$ScriptVersion = '5.7.6'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -759,6 +759,46 @@ function Get-FileStateSnapshot
 }
 
 # Restores a snapshot taken by Get-FileStateSnapshot. This is only used after a failed commit.
+# Restoring a snapshot is only safe while the file still holds what this run put there. Anything
+# else means something changed it afterwards, and that version outranks a pre-run snapshot.
+function Test-RestoreIsSafe
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [byte[]]
+        $InstalledBytes
+    )
+
+    # Nothing was written here, so the snapshot is the only version that ever existed.
+    if ($null -eq $InstalledBytes)
+    {
+        return $true
+    }
+
+    # Deleting the file is a change too, and re-creating it would undo someone's decision.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf))
+    {
+        return $false
+    }
+
+    try
+    {
+        return [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals(
+            [System.IO.File]::ReadAllBytes($Path), $InstalledBytes)
+    }
+    catch
+    {
+        return $false
+    }
+}
+
 function Restore-FileStateSnapshot
 {
     param
@@ -924,7 +964,8 @@ function Test-ModelName
     # U+0085, U+2028, and U+2029 end a line for a YAML parser but not for .NET's (?m)^ anchor, so an injected key would slip past Test-AgentFile.
     # Unicode format and surrogate code points are rejected to prevent invisible or malformed names.
     # DEL and the C1 block are excluded from YAML's printable set, so they would make the file invalid.
-    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\x7F-\x9F\u0085\u2028\u2029\p{Cf}\p{Cs}]')
+    # U+FFFE and U+FFFF are noncharacters that YAML also excludes.
+    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\x7F-\x9F\u0085\u2028\u2029\uFFFE\uFFFF\p{Cf}\p{Cs}]')
     {
         return $false
     }
@@ -1172,6 +1213,9 @@ function Get-CachedModelRecord
 
     # VS Code keeps the state database open, and large values span overflow pages,
     # so the file has to be copied and read through SQLite rather than scanned as text.
+    # The copy lands in the per-user temp directory under a random name and is removed in the
+    # finally below. A process killed mid-read can leave one behind, which is why it is worth
+    # knowing that the file holds the same VS Code state the same user can already read.
     $TempCopy = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-state-$([guid]::NewGuid().ToString('N')).vscdb"
     $Database = [IntPtr]::Zero
     $Statement = [IntPtr]::Zero
@@ -3139,6 +3183,40 @@ function Install-AgentFile
 # variable that did not expand still produces a valid file, VS Code still loads it, and the agent
 # just behaves badly with no error anywhere. Checking the file we actually wrote is the only way
 # to catch that.
+# A matching file name is a naming convention, not proof this installer wrote the file. Only the
+# front matter is inspected: the body is prose that may legitimately quote front-matter syntax.
+function Test-OwnedAgentFile
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $Path
+    )
+
+    try
+    {
+        $Content = Read-Utf8File -Path $Path
+    }
+    catch
+    {
+        return $false
+    }
+
+    $FrontMatterMatch = [regex]::Match($Content, '(?s)\A---\r?\n(.*?)\r?\n---\r?\n')
+
+    if (-not $FrontMatterMatch.Success)
+    {
+        return $false
+    }
+
+    $FrontMatter = $FrontMatterMatch.Groups[1].Value
+
+    return $FrontMatter -match '(?m)^target: vscode\r?$' -and
+        $FrontMatter -match '(?m)^user-invocable: false\r?$' -and
+        $FrontMatter -match '(?m)^name: .+ (Expert|Reviewer)\r?$'
+}
+
 function Test-AgentFile
 {
     [CmdletBinding(DefaultParameterSetName = 'Path')]
@@ -3556,6 +3634,10 @@ $AgentActivationCommitted = $false
 $OriginalVSCodeSettingsState = $null
 $VSCodeSettingWriteState = @{ Attempted = $false; WrittenContent = $null }
 $VSCodeSettingChanged = $false
+
+# What this run actually placed on disk, keyed by path. The failure handler compares against it so
+# a rollback cannot overwrite an edit someone made after the write.
+$InstalledAgentBytes = @{}
 
 # Read by the failure handler. Seeded here so a future reordering cannot make Set-StrictMode fault
 # inside the handler and hide the error it was reporting.
@@ -4082,8 +4164,23 @@ foreach ($AgentFile in $GeneratedAgentFiles)
 $StaleAgentFiles = @(
     if (-not $AgentDirectoryIsLinked)
     {
-        Get-ChildItem -LiteralPath $AgentDirectory -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^mm-(expert|reviewer)-.+\.agent\.md$' -and -not $CurrentAgentFiles.Contains($_.Name) }
+        foreach ($Candidate in (Get-ChildItem -LiteralPath $AgentDirectory -File -ErrorAction SilentlyContinue))
+        {
+            if ($Candidate.Name -notmatch '^mm-(expert|reviewer)-.+\.agent\.md$' -or $CurrentAgentFiles.Contains($Candidate.Name))
+            {
+                continue
+            }
+
+            # Decided here rather than at deletion time, so a file this installer disclaims never
+            # enters the managed set and cannot be written by a rollback either.
+            if (-not (Test-OwnedAgentFile -Path $Candidate.FullName))
+            {
+                Write-Console "Left a file alone because its front matter is not this installer's, despite matching the naming pattern: $($Candidate.Name)" -Level 'Warning'
+                continue
+            }
+
+            $Candidate
+        }
     })
 
 $ManagedAgentPaths = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
@@ -4114,6 +4211,9 @@ foreach ($AgentFile in $GeneratedAgentFiles)
     -FileName $AgentFile.FileName `
     -Content $AgentFile.Content `
     -BackupDirectory $BackupDirectory
+
+    $InstalledAgentPath = Join-Path -Path $AgentDirectory -ChildPath $AgentFile.FileName
+    $InstalledAgentBytes[$InstalledAgentPath] = [System.IO.File]::ReadAllBytes($InstalledAgentPath)
 }
 
 Complete-InstallStep
@@ -4130,9 +4230,25 @@ foreach ($AgentFile in $GeneratedAgentFiles)
 # Removal happens only after the complete replacement set has passed validation above.
 foreach ($StaleFile in $StaleAgentFiles)
 {
-    Backup-ExistingFile -Path $StaleFile.FullName -BackupDirectory $BackupDirectory
-    Remove-Item -LiteralPath $StaleFile.FullName -Force
-    Write-Console "Removed agent file left over from a previous configuration: $($StaleFile.Name)"
+    # Re-checked immediately before deletion to keep the window between decision and removal small.
+    if (-not (Test-OwnedAgentFile -Path $StaleFile.FullName))
+    {
+        Write-Console "Left a file alone because it changed after this run examined it: $($StaleFile.Name)" -Level 'Warning'
+        continue
+    }
+
+    try
+    {
+        Backup-ExistingFile -Path $StaleFile.FullName -BackupDirectory $BackupDirectory
+        Remove-Item -LiteralPath $StaleFile.FullName -Force
+        Write-Console "Removed agent file left over from a previous configuration: $($StaleFile.Name)"
+    }
+    catch
+    {
+        # A leftover file is cosmetic. Failing the install over one would undo a roster that is
+        # already written and validated.
+        Write-Console "Could not remove the leftover agent file $($StaleFile.Name). $($_.Exception.Message)" -Level 'Warning'
+    }
 }
 
 $AgentActivationCommitted = $true
@@ -4274,17 +4390,30 @@ catch
     if ($AgentActivationStarted -and -not $AgentActivationCommitted -and $null -ne $OriginalAgentState)
     {
         $RollbackFailures = New-Object System.Collections.Generic.List[string]
+        $RollbackSkipped = New-Object System.Collections.Generic.List[string]
 
         foreach ($Snapshot in $OriginalAgentState)
         {
             try
             {
+                if (-not (Test-RestoreIsSafe -Path $Snapshot.Path -InstalledBytes $InstalledAgentBytes[$Snapshot.Path]))
+                {
+                    $RollbackSkipped.Add($Snapshot.Path)
+                    continue
+                }
+
                 Restore-FileStateSnapshot -Snapshot $Snapshot
             }
             catch
             {
                 $RollbackFailures.Add("$($Snapshot.Path): $($_.Exception.Message)")
             }
+        }
+
+        if ($RollbackSkipped.Count -gt 0)
+        {
+            Write-Console "Some agent files changed after this run wrote them and were left as they are. Recover the previous version from $BackupDirectory if you need it." -Level 'Warning'
+            Write-Verbose ($RollbackSkipped -join [Environment]::NewLine)
         }
 
         if ($RollbackFailures.Count -eq 0)

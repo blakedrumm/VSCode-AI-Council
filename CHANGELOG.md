@@ -5,6 +5,54 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.6
+
+The security findings that 5.7.5 deliberately deferred, plus another Tier 5 review. The release
+pipeline is the largest change: it no longer builds and publishes in one place.
+
+### Changed
+
+- **Building and publishing no longer share a job or a credential.** The release workflow ran the
+  installer, the analyzer, and two test suites in the same job that later received the token used to
+  publish, so anything executing during the build could have reached it. Building and testing now
+  happen with read-only permissions and no secrets, and publishing happens in a separate job that
+  never checks out or executes repository code. It downloads the candidate, then re-derives what it
+  needs from the immutable commit through the API: it re-reads the installer at that commit and
+  refuses to publish anything whose content does not match, confirms the committed file reports the
+  version being published, refuses a tag that already points somewhere else, re-checks that the
+  commit is contained in the repository's default branch, and validates the manifest and both
+  hashes. SFTP publishing is a third job that holds only its own secrets.
+- **A published version is now immutable.** Re-running a release used to replace the assets in
+  place, which can leave a downloader holding a digest that no longer describes what is served.
+  Publishing over an existing release now fails and asks for a version bump instead.
+- **SFTP uploads are staged and renamed** rather than written straight to the live names, so an
+  interrupted transfer cannot leave a published file truncated or the pair half updated.
+
+### Fixed
+
+- **Matching a file name is no longer treated as owning the file.** The sweep that removes agents
+  from a previous configuration selected purely on the name, so a hand-written file called
+  `mm-expert-something.agent.md` would have been deleted. A file is now only removed if its front
+  matter is the kind this installer emits. Only the front matter is inspected, because the body of
+  an agent file may legitimately quote front-matter syntax as an example. A file that fails the
+  check is reported and never enters the managed set at all, so a rollback cannot write to it
+  either.
+- **Rollback could overwrite an edit made after the installer wrote the file.** Restoring now
+  happens only while the file still holds exactly what this run put there, matching the rule the
+  settings file already followed. A file that was changed, or deleted, after this run wrote it is
+  left as it is and reported.
+- **Removing a leftover file can no longer fail an install that already succeeded.** A file that
+  vanished between the check and the delete threw, which rolled back a roster that was written and
+  validated.
+- **U+FFFE and U+FFFF were accepted in model names.** Both are noncharacters that YAML excludes,
+  so they could produce front matter VS Code cannot read.
+
+### Notes
+
+- Copying the VS Code state database to the per-user temp directory is deliberate and documented in
+  place. The copy is randomly named and removed in a `finally`; a process killed mid-read can leave
+  one behind, and it contains VS Code state the same user can already read.
+
 ## 5.7.5
 
 Three full council reviews of 5.7.4. Every fix below was reproduced first, and the test suite was

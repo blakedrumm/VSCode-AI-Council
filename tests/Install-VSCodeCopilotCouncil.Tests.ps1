@@ -19,6 +19,7 @@ BeforeAll {
         'Write-Utf8File',
         'Read-Utf8File',
         'Get-FileStateSnapshot',
+        'Test-RestoreIsSafe',
         'Restore-FileStateSnapshot',
         'Backup-ExistingFile',
         'Remove-ExpiredBackup',
@@ -43,6 +44,7 @@ BeforeAll {
         'New-ReviewerAgentContent',
         'New-ExpertAgentContent',
         'New-CoordinatorAgentContent',
+        'Test-OwnedAgentFile',
         'Test-AgentFile',
         'Test-GeneratedAgentFile',
         'Get-PublishedScriptVersion',
@@ -134,6 +136,12 @@ Describe 'Model input and recommendation' {
         @{ Candidate = 'Model: injected' }
         @{ Candidate = "Model$([char]0x200F)Name" }
         @{ Candidate = "Model$([char]0x2028)Name" }
+        @{ Candidate = "Model$([char]0x2029)Name" }
+        @{ Candidate = "Model$([char]0x007F)Name" }
+        @{ Candidate = "Model$([char]0x0080)Name" }
+        @{ Candidate = "Model$([char]0x009F)Name" }
+        @{ Candidate = "Model$([char]0xFFFE)Name" }
+        @{ Candidate = "Model$([char]0xFFFF)Name" }
     ) {
         param ($Candidate)
 
@@ -504,6 +512,45 @@ Describe 'Atomic file writes' {
 
     AfterEach {
         Remove-Item -LiteralPath $script:WriteTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Context 'Test-RestoreIsSafe' {
+        It 'restores when this run never wrote the file' {
+            $Path = Join-Path $script:WriteTestRoot 'a.md'
+            [System.IO.File]::WriteAllText($Path, 'someone else')
+
+            Test-RestoreIsSafe -Path $Path -InstalledBytes $null | Should -BeTrue
+        }
+
+        It 'restores when the file still holds what this run wrote' {
+            $Path = Join-Path $script:WriteTestRoot 'b.md'
+            $Bytes = [System.Text.Encoding]::UTF8.GetBytes('ours')
+            [System.IO.File]::WriteAllBytes($Path, $Bytes)
+
+            Test-RestoreIsSafe -Path $Path -InstalledBytes $Bytes | Should -BeTrue
+        }
+
+        It 'leaves a file that changed after this run wrote it' {
+            $Path = Join-Path $script:WriteTestRoot 'c.md'
+            [System.IO.File]::WriteAllText($Path, 'edited by someone else')
+
+            Test-RestoreIsSafe -Path $Path -InstalledBytes ([System.Text.Encoding]::UTF8.GetBytes('ours')) |
+                Should -BeFalse
+        }
+
+        It 'leaves a file that was deleted after this run wrote it' {
+            $Path = Join-Path $script:WriteTestRoot 'missing.md'
+
+            # Deleting is a change too, so re-creating it would undo someone's decision.
+            Test-RestoreIsSafe -Path $Path -InstalledBytes ([System.Text.Encoding]::UTF8.GetBytes('ours')) |
+                Should -BeFalse
+        }
+
+        It 'restores a path this run never wrote even when it is missing' {
+            $Path = Join-Path $script:WriteTestRoot 'stale.md'
+
+            Test-RestoreIsSafe -Path $Path -InstalledBytes $null | Should -BeTrue
+        }
     }
 
     It 'leaves the original file intact when the replacement cannot complete' {
@@ -1096,6 +1143,43 @@ Describe 'End-to-end workspace install' {
                 [System.IO.Directory]::Delete($Link, $false)
             }
         }
+    }
+
+    It 'does not delete a lookalike file it did not write' -ForEach @(
+        @{
+            Label = 'unrelated front matter'
+            Text = "---`nname: Something Else`n---`n`nHand written."
+        }
+        @{
+            # The body of an agent file may legitimately quote front-matter syntax as an example,
+            # so matching anywhere in the file would condemn this one.
+            Label = 'body quotes front matter'
+            Text = "# Notes`n`nAn agent file starts like this:`n`nname: My Custom Expert`ntarget: vscode`nuser-invocable: false`n"
+        }
+    ) {
+        $Arguments = @{
+            Scope = 'Workspace'
+            WorkspacePath = $script:InstallTestRoot
+            NonInteractive = $true
+            SkipUpdateCheck = $true
+            SkipVSCodeSetting = $true
+            Models = @('Claude Opus 5', 'Grok 4.5')
+        }
+
+        & $script:InstallerPath @Arguments | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Impostor = Join-Path $AgentDirectory 'mm-expert-handwritten.agent.md'
+        [System.IO.File]::WriteAllText($Impostor, $Text)
+
+        # Reinstalling with one model makes the second model's files stale, which is what triggers
+        # the sweep that used to select purely on the file name.
+        $Arguments.Models = @('Claude Opus 5')
+        & $script:InstallerPath @Arguments | Out-Null
+
+        Test-Path -LiteralPath $Impostor | Should -BeTrue
+        [System.IO.File]::ReadAllText($Impostor) | Should -BeExactly $Text
+        Test-Path -LiteralPath (Join-Path $AgentDirectory 'mm-expert-grok-4-5.agent.md') | Should -BeFalse
     }
 
     It 'refuses a workspace path that is a file rather than a directory' {
