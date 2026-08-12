@@ -10,3 +10,7 @@ desktop.ini
 # The shareable plain-text copy of the installer stays local. The repository is the canonical
 # source now, and a second copy would only drift out of sync.
 Install-VSCodeCopilotCouncil-v5.txt
+
+# Scratch workspaces from running the installer by hand. The Pester suite writes to the system
+# temp directory instead, so nothing here is ever a test artifact.
+/temp-*/

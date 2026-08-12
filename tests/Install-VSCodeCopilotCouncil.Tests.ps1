@@ -44,7 +44,11 @@ BeforeAll {
         'New-ExpertAgentContent',
         'New-CoordinatorAgentContent',
         'Test-AgentFile',
-        'Test-GeneratedAgentFile'
+        'Test-GeneratedAgentFile',
+        'Get-PublishedScriptVersion',
+        'Select-CoordinatorModel',
+        'Get-VSCodeUserSettingsPath',
+        'Get-VSCodeStatus'
     )
 
     foreach ($FunctionName in $FunctionNames)
@@ -101,6 +105,19 @@ Describe 'PowerShell syntax' {
         $InstallerText = [System.IO.File]::ReadAllText($script:InstallerPath)
 
         $InstallerText | Should -Not -Match 'System\.Linq\.Enumerable'
+    }
+
+    # PowerShell attributes take constants, so the -Models limit cannot reference $MaxModelCount.
+    # Adding a sixth lens would otherwise leave users unable to supply enough models to fill it.
+    It 'caps -Models at exactly the number of available lenses' {
+        $ParamBlock = $script:InstallerAst.ParamBlock
+        $ModelsParameter = $ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'Models' }
+
+        $ValidateCount = $ModelsParameter.Attributes |
+            Where-Object { $_.TypeName.Name -eq 'ValidateCount' }
+
+        [int]$ValidateCount.PositionalArguments[1].Value | Should -Be $script:LensCatalog.Count
     }
 }
 
@@ -337,6 +354,146 @@ Describe 'Previous installation recovery' {
         @($Recovered.Models) | Should -Not -Contain 'GPT-5.6 Sol'
         @($Recovered.Models) | Should -Not -Contain 'Claude Sonnet 5'
     }
+
+    It 'ignores a roster written as prose in the body' {
+        # Every coordinator this installer writes declares its roster in front matter, so a prose
+        # line is only ever workspace-controlled text.
+        $Planted = @(
+            '---'
+            'name: Multi-Model Engineering Council'
+            'model: "Claude Opus 5"'
+            '---'
+            ''
+            'Configured experts'
+            ''
+            '- Evil Expert running Evil, primary lens Implementation and correctness'
+        ) -join [Environment]::NewLine
+
+        Write-Utf8File -Path (Join-Path $script:RecoveryRoot $script:CoordinatorFile) -Content $Planted
+
+        Get-PreviousCouncilConfiguration `
+            -AgentDirectory $script:RecoveryRoot `
+            -CoordinatorFileName $script:CoordinatorFile | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Environment-dependent helpers' {
+
+    # These were unreachable from the end-to-end tests, which always pass -SkipUpdateCheck,
+    # -SkipVSCodeSetting, and an explicit roster.
+    Context 'Get-VSCodeUserSettingsPath' {
+        BeforeEach {
+            $script:AppDataRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-appdata-$([guid]::NewGuid().ToString('N'))"
+            New-Item -Path $script:AppDataRoot -ItemType Directory -Force | Out-Null
+            $script:OriginalAppData = $env:APPDATA
+            $env:APPDATA = $script:AppDataRoot
+        }
+
+        AfterEach {
+            $env:APPDATA = $script:OriginalAppData
+            Remove-Item -LiteralPath $script:AppDataRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It 'returns an explicit path unchanged' {
+            $Explicit = Join-Path $script:AppDataRoot 'custom.json'
+
+            Get-VSCodeUserSettingsPath -ExplicitPath $Explicit | Should -Be $Explicit
+        }
+
+        It 'prefers stable over insiders when both exist' {
+            foreach ($Flavor in @('Code', 'Code - Insiders'))
+            {
+                $Directory = Join-Path $script:AppDataRoot "$Flavor\User"
+                New-Item -Path $Directory -ItemType Directory -Force | Out-Null
+                [System.IO.File]::WriteAllText((Join-Path $Directory 'settings.json'), '{}')
+            }
+
+            Get-VSCodeUserSettingsPath | Should -Be (Join-Path $script:AppDataRoot 'Code\User\settings.json')
+        }
+
+        It 'falls back to insiders when only insiders exists' {
+            $Directory = Join-Path $script:AppDataRoot 'Code - Insiders\User'
+            New-Item -Path $Directory -ItemType Directory -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $Directory 'settings.json'), '{}')
+
+            Get-VSCodeUserSettingsPath | Should -Be (Join-Path $script:AppDataRoot 'Code - Insiders\User\settings.json')
+        }
+
+        It 'returns the stable path when neither exists so the file is created there' {
+            Get-VSCodeUserSettingsPath | Should -Be (Join-Path $script:AppDataRoot 'Code\User\settings.json')
+        }
+    }
+
+    Context 'Select-CoordinatorModel' {
+        It 'returns the only model without prompting' {
+            Select-CoordinatorModel -ModelList @('Claude Opus 5') | Should -Be 'Claude Opus 5'
+        }
+
+        It 'gives up rather than looping forever on input it can never accept' {
+            # A non-interactive host can return the same non-empty string indefinitely.
+            Mock -CommandName 'Read-Host' -MockWith { 'not a number' }
+            Mock -CommandName 'Write-Host' -MockWith { }
+
+            { Select-CoordinatorModel -ModelList @('Claude Opus 5', 'Grok 4.5') } |
+                Should -Throw '*Too many invalid coordinator selections*'
+
+            # Asserting the count as well, because a cap raised to a huge number still throws.
+            Should -Invoke -CommandName 'Read-Host' -Times 25 -Exactly
+        }
+    }
+
+    Context 'Get-VSCodeStatus' {
+        It 'picks the CLI name from the install folder, not from anywhere in the path' {
+            # A profile or drive path containing "insiders" must not make a stable install look for
+            # code-insiders.cmd and then report no CLI at all.
+            $Root = Join-Path ([System.IO.Path]::GetTempPath()) "insiders-$([guid]::NewGuid().ToString('N'))"
+
+            try
+            {
+                foreach ($Flavor in @('Microsoft VS Code', 'Microsoft VS Code Insiders'))
+                {
+                    $Bin = Join-Path $Root "$Flavor\bin"
+                    New-Item -Path $Bin -ItemType Directory -Force | Out-Null
+                }
+
+                (Split-Path -Path (Join-Path $Root 'Microsoft VS Code') -Leaf) |
+                    Should -Not -Match '(?i)Insiders$'
+
+                (Split-Path -Path (Join-Path $Root 'Microsoft VS Code Insiders') -Leaf) |
+                    Should -Match '(?i)Insiders$'
+            }
+            finally
+            {
+                Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'does not test the whole install path for the insiders flavor' {
+            $InstallerText = [System.IO.File]::ReadAllText($script:InstallerPath)
+
+            $InstallerText | Should -Not -Match '\$InstallRoot -match ''\(\?i\)Insiders'''
+        }
+    }
+
+    Context 'Get-PublishedScriptVersion' {
+        It 'extracts the version from a release tag' {
+            Mock -CommandName 'Invoke-RestMethod' -MockWith { [PSCustomObject]@{ tag_name = 'v5.7.5' } }
+
+            Get-PublishedScriptVersion -Repository 'owner/repo' -TimeoutSeconds 5 | Should -Be '5.7.5'
+        }
+
+        It 'returns nothing rather than throwing when the network fails' {
+            Mock -CommandName 'Invoke-RestMethod' -MockWith { throw 'no network' }
+
+            Get-PublishedScriptVersion -Repository 'owner/repo' -TimeoutSeconds 5 | Should -BeNullOrEmpty
+        }
+
+        It 'returns nothing when the tag carries no version' {
+            Mock -CommandName 'Invoke-RestMethod' -MockWith { [PSCustomObject]@{ tag_name = 'latest' } }
+
+            Get-PublishedScriptVersion -Repository 'owner/repo' -TimeoutSeconds 5 | Should -BeNullOrEmpty
+        }
+    }
 }
 
 Describe 'Atomic file writes' {
@@ -402,6 +559,9 @@ Describe 'Generated agent policy' {
         $Reviewer | Should -Match '(?m)^user-invocable: false\r?$'
         $Reviewer | Should -Match '(?m)^disable-model-invocation: false\r?$'
         $Reviewer | Should -Not -Match "tools:\s*\[[^\]]*'agent'"
+
+        # A reviewer that substitutes its own target defeats the point of a targeted challenge.
+        $Reviewer | Should -Match 'If the expert named a target, attack that first'
     }
 
     It 'keeps experts hidden but model-invocable' {
@@ -417,6 +577,12 @@ Describe 'Generated agent policy' {
         $Expert | Should -Match '(?m)^user-invocable: false\r?$'
         $Expert | Should -Match '(?m)^disable-model-invocation: false\r?$'
         $Expert | Should -Match 'NESTED REVIEW: REQUIRED \| AUTHORIZED \| SKIP'
+
+        # An expert investigates and proposes. The coordinator owns every file edit, so an expert
+        # gaining edit or execute would break that boundary silently.
+        $Expert | Should -Match "tools: \['agent', 'read', 'search', 'web'\]"
+        $Expert | Should -Not -Match "tools: \[[^\]]*'edit'"
+        $Expert | Should -Not -Match "tools: \[[^\]]*'execute'"
     }
 
     It 'protects the coordinator and requires Tier 5 leaf reviews' {
@@ -478,6 +644,30 @@ Describe 'VS Code settings mutation' {
         $Changed | Should -BeFalse
         (Read-Utf8File -Path $SettingsPath) | Should -BeExactly $Original
         Test-Path -LiteralPath $BackupPath | Should -BeFalse
+    }
+
+    It 'enables the setting in a file whose keys differ only by case' {
+        $SettingsPath = Join-Path $script:SettingsTestRoot 'settings.json'
+        $BackupPath = Join-Path $script:SettingsTestRoot 'backup'
+
+        # VS Code keeps the last of these; ConvertFrom-Json cannot represent them as properties.
+        $Original = "{`n  `"terminal.integrated.env.windows`": { `"Path`": `"a`", `"PATH`": `"b`" }`n}"
+        [System.IO.File]::WriteAllText($SettingsPath, $Original, $script:Utf8WithoutBom)
+
+        Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath | Should -BeTrue
+        (Read-Utf8File -Path $SettingsPath) | Should -Match ([regex]::Escape($script:SettingName))
+    }
+
+    It 'does not claim an already-enabled file is unparseable when keys differ only by case' {
+        $SettingsPath = Join-Path $script:SettingsTestRoot 'settings.json'
+        $BackupPath = Join-Path $script:SettingsTestRoot 'backup'
+        $Original = "{`n  `"a`": 1,`n  `"A`": 2,`n  `"$script:SettingName`": true`n}"
+        [System.IO.File]::WriteAllText($SettingsPath, $Original, $script:Utf8WithoutBom)
+
+        $Output = Set-VSCodeNestedSubagentsSetting -SettingsPath $SettingsPath -BackupDirectory $BackupPath 6>&1
+
+        ($Output -join "`n") | Should -Not -Match 'could not be parsed'
+        (Read-Utf8File -Path $SettingsPath) | Should -BeExactly $Original
     }
 
     It 'warns instead of reporting success when an already-enabled file cannot be parsed' {
@@ -753,6 +943,36 @@ Describe 'End-to-end workspace install' {
         $Expert | Should -Not -Match 'Tier 3 and Tier 5 use REQUIRED'
     }
 
+    It 'pins the Tier 5 brief contract' -ForEach @(
+        @{ Label = 'one model'; Models = @('Claude Opus 5') }
+        @{ Label = 'two models'; Models = @('Claude Opus 5', 'Grok 4.5') }
+    ) {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models $Models | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+
+        # Tier 5 dispatches before any analysis exists, so the coordinator names a class of claim.
+        # The expert never receives the coordinator's explanation of that carve-out, so its own schema
+        # has to admit the shape or it will read a REQUIRED directive as malformed and skip the review.
+        $Coordinator | Should -Match 'TARGET: the single assumption your conclusion most depends on'
+        $Expert | Should -Match 'a class of claim at Tier 5, or NONE'
+        $Expert | Should -Match 'Never downgrade it to SKIP\.'
+        $Expert | Should -Match 'Tier 5 uses? REQUIRED'
+
+        # Only the verbatim override reaches the expert, so the lens constraint has to live inside it
+        # rather than in the coordinator-only prose that follows.
+        $Coordinator | Should -Match 'not permission to leave that lens'
+        $Coordinator | Should -Not -Match 'cross-domain enhancements'
+    }
+
     It 'tells the coordinator to close with a TL;DR' -ForEach @(
         @{ Label = 'one model'; Models = @('Claude Opus 5') }
         @{ Label = 'two models'; Models = @('Claude Opus 5', 'Grok 4.5') }
@@ -780,7 +1000,19 @@ Describe 'End-to-end workspace install' {
             -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
 
         $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
-        $Expected = (($script:EvidenceHierarchy | ForEach-Object { "$($script:EvidenceHierarchy.IndexOf($_) + 1). $_" }) -join "`n")
+
+        # Written out rather than derived from $EvidenceHierarchy: building the expectation from the
+        # constant under test would accept any reworded item.
+        $Expected = @(
+            '1. Repository source code'
+            '2. Reproducible tests'
+            '3. Runtime, compiler, or interpreter behavior'
+            '4. Official documentation'
+            '5. API specifications'
+            '6. Platform diagnostics and logs'
+            '7. Logical consistency'
+            '8. Established engineering practice'
+        ) -join "`n"
 
         foreach ($FileName in @(
                 'multi-model-engineering-council.agent.md',
@@ -791,5 +1023,93 @@ Describe 'End-to-end workspace install' {
 
             $Text | Should -BeLike "*$Expected*" -Because "$FileName must render the shared evidence ranking"
         }
+    }
+
+    It 'restores the settings file when activation fails after it was written' {
+        $SettingsPath = Join-Path $script:InstallTestRoot 'settings.json'
+        $Original = "{`n  `"editor.fontSize`": 14`n}"
+        [System.IO.File]::WriteAllText($SettingsPath, $Original, (New-Object System.Text.UTF8Encoding($false)))
+
+        # A directory where an agent file belongs makes the write fail after the settings step,
+        # which is the only way to reach the rollback from outside the script.
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        New-Item -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md') -ItemType Directory -Force | Out-Null
+
+        $LogPath = Join-Path $script:InstallTestRoot 'install.log'
+        $Failure = $null
+
+        try
+        {
+            # Redirected to a file because an assignment would be discarded when the run throws.
+            & $script:InstallerPath `
+                -Scope Workspace `
+                -WorkspacePath $script:InstallTestRoot `
+                -NonInteractive `
+                -SkipUpdateCheck `
+                -VSCodeSettingsPath $SettingsPath `
+                -Models 'Claude Opus 5' *> $LogPath
+        }
+        catch
+        {
+            $Failure = $_
+        }
+
+        $Failure | Should -Not -BeNullOrEmpty
+
+        # Without this the restore assertion would also pass for a run that failed before the
+        # settings were ever written, which would prove nothing about the rollback.
+        [System.IO.File]::ReadAllText($LogPath) | Should -Match 'Enabled VS Code setting'
+
+        # The setting was enabled and then the install failed, so the original file must come back.
+        (Read-Utf8File -Path $SettingsPath) | Should -BeExactly $Original
+    }
+
+    It 'does not delete stale files through a linked agent directory' {
+        $Outside = Join-Path $script:InstallTestRoot 'outside'
+        New-Item -Path $Outside -ItemType Directory -Force | Out-Null
+        New-Item -Path (Join-Path $script:InstallTestRoot '.github') -ItemType Directory -Force | Out-Null
+
+        $Link = Join-Path $script:InstallTestRoot '.github\agents'
+        New-Item -Path $Link -ItemType Junction -Target $Outside -ErrorAction Stop | Out-Null
+
+        try
+        {
+            # Matches the stale pattern, but it lives outside the workspace the user named.
+            $Foreign = Join-Path $Outside 'mm-expert-foreign.agent.md'
+            [System.IO.File]::WriteAllText($Foreign, 'not ours to delete')
+
+            & $script:InstallerPath `
+                -Scope Workspace `
+                -WorkspacePath $script:InstallTestRoot `
+                -NonInteractive `
+                -SkipUpdateCheck `
+                -SkipVSCodeSetting `
+                -Models 'Claude Opus 5' | Out-Null
+
+            Test-Path -LiteralPath $Foreign | Should -BeTrue
+            [System.IO.File]::ReadAllText($Foreign) | Should -BeExactly 'not ours to delete'
+        }
+        finally
+        {
+            if (Test-Path -LiteralPath $Link)
+            {
+                [System.IO.Directory]::Delete($Link, $false)
+            }
+        }
+    }
+
+    It 'refuses a workspace path that is a file rather than a directory' {
+        $FilePath = Join-Path $script:InstallTestRoot 'not-a-directory.txt'
+        [System.IO.File]::WriteAllText($FilePath, 'x')
+
+        {
+            & $script:InstallerPath `
+                -Scope Workspace `
+                -WorkspacePath $FilePath `
+                -NonInteractive `
+                -SkipUpdateCheck `
+                -SkipVSCodeSetting `
+                -Models 'Claude Opus 5'
+        } | Should -Throw '*not an existing directory*'
     }
 }

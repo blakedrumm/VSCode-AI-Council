@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.4
+        5.7.5
 
     Compatible with:
         Windows PowerShell 5.1
@@ -317,7 +317,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.4'
+$ScriptVersion = '5.7.5'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -923,7 +923,8 @@ function Test-ModelName
     # These characters would break the YAML front matter the agent files depend on.
     # U+0085, U+2028, and U+2029 end a line for a YAML parser but not for .NET's (?m)^ anchor, so an injected key would slip past Test-AgentFile.
     # Unicode format and surrogate code points are rejected to prevent invisible or malformed names.
-    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\u0085\u2028\u2029\p{Cf}\p{Cs}]')
+    # DEL and the C1 block are excluded from YAML's printable set, so they would make the file invalid.
+    if ($Name -match '[:"''\\{}\[\]#,]' -or $Name -match '[\x00-\x1F\x7F-\x9F\u0085\u2028\u2029\p{Cf}\p{Cs}]')
     {
         return $false
     }
@@ -970,6 +971,19 @@ function Get-PropertyValue
 
     if ($null -eq $InputObject)
     {
+        return $null
+    }
+
+    # A settings file whose keys differ only by case is parsed into a dictionary, because
+    # ConvertFrom-Json cannot represent those keys as distinct properties. ContainsKey is used
+    # rather than Contains: a generic Dictionary implements the non-generic Contains explicitly.
+    if ($InputObject -is [System.Collections.IDictionary])
+    {
+        if ($InputObject.ContainsKey($Name))
+        {
+            return $InputObject[$Name]
+        }
+
         return $null
     }
 
@@ -1468,23 +1482,6 @@ function Get-PreviousCouncilConfiguration
 
     if ($PreviousModels.Count -lt 1)
     {
-        # Matches the roster line this installer writes: "- <Model> Expert running <Model>, primary lens <Lens>".
-        foreach ($Line in $Lines)
-        {
-            if ($Line -match '^-\s.+\sExpert\srunning\s(?<model>[^,]+),\sprimary\slens\s.+$')
-            {
-                $Candidate = $Matches['model'].Trim()
-
-                if ((Test-ModelName -Name $Candidate) -and $SeenModels.Add($Candidate))
-                {
-                    $PreviousModels.Add($Candidate)
-                }
-            }
-        }
-    }
-
-    if ($PreviousModels.Count -lt 1)
-    {
         return $null
     }
 
@@ -1962,8 +1959,18 @@ function Select-CoordinatorModel
         return $ModelList[0]
     }
 
+    $Attempt = 0
+
     while ($true)
     {
+        $Attempt++
+
+        # Bounded like the model picker, so a host whose Read-Host never blocks cannot spin forever.
+        if ($Attempt -gt 25)
+        {
+            throw 'Too many invalid coordinator selections. Re-run with -CoordinatorModel to choose without the prompt.'
+        }
+
         Write-Host ''
         Write-Host 'Which model should run the coordinator?'
 
@@ -2089,7 +2096,39 @@ function ConvertFrom-JsoncText
             if ($Match.Groups[1].Success) { $Match.Value } else { '' }
         })
 
-    return ($StrictJson | ConvertFrom-Json)
+    # Keys differing only by case are valid JSON that VS Code accepts, keeping the last one, but
+    # ConvertFrom-Json refuses to build an object from them. The fallback is structural rather than
+    # keyed on the error text, because PowerShell localizes that message.
+    try
+    {
+        return ($StrictJson | ConvertFrom-Json)
+    }
+    catch
+    {
+        $ObjectParseFailure = $_
+
+        try
+        {
+            if ((Get-Command -Name 'ConvertFrom-Json').Parameters.ContainsKey('AsHashtable'))
+            {
+                return ($StrictJson | ConvertFrom-Json -AsHashtable)
+            }
+
+            Add-Type -AssemblyName 'System.Web.Extensions' -ErrorAction Stop
+
+            # The defaults are 2 MB and 100 levels, which is stricter than the parser above.
+            $Serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+            $Serializer.MaxJsonLength = [int]::MaxValue
+            $Serializer.RecursionLimit = 1024
+
+            return $Serializer.DeserializeObject($StrictJson)
+        }
+        catch
+        {
+            # Genuinely malformed JSON fails both parsers, and the first message is the useful one.
+            throw $ObjectParseFailure
+        }
+    }
 }
 
 # Locates a property value on the root JSON object without mistaking comments, strings, nested
@@ -2474,6 +2513,8 @@ An expert agent invoked you for one independent challenge. You have no subagent 
 
 Attack the supplied conclusion where it is weakest, then state what you would conclude instead.
 
+If the expert named a target, attack that first, then say whether you found something weaker. A targeted challenge is the reason you were invoked, so do not silently substitute your own.
+
 Evaluate:
 
 - factual and technical correctness
@@ -2609,7 +2650,7 @@ The coordinator must include exactly one directive block in your delegation brie
 
     NESTED REVIEW: REQUIRED | AUTHORIZED | SKIP
     REVIEWER: one reviewer from the list above, or NONE
-    TARGET: one concrete claim or assumption to challenge, or NONE
+    TARGET: one concrete claim or assumption to challenge, a class of claim at Tier 5, or NONE
 
 REQUIRED means you must form your own position, then invoke the named reviewer exactly once and ask it to attack the target. $RequiredTierLine
 
@@ -2621,6 +2662,8 @@ AUTHORIZED means you may invoke the named reviewer once, but only when at least 
 - the evidence is thin or conflicting
 
 SKIP means do not invoke a reviewer. If the directive is missing or malformed, treat it as SKIP and report that omission.
+
+A Tier 5 target names a class of claim rather than a specific one, because that tier dispatches before any analysis exists. That is well formed. Pick the claim in your own finished analysis that fits the class, and have the reviewer attack that. Never downgrade it to SKIP.
 
 Never substitute a different reviewer or target without reporting why the named one is unavailable. A nested review roughly doubles the cost of your branch.
 
@@ -2873,15 +2916,17 @@ Dispatch one expert per configured model, each with its own lens and its own sco
 
 Append this override verbatim to EVERY delegation brief you send in this tier:
 
-    This is a Tier 5 brainstorm. Ignore your standard 8-line brevity limits. Provide a comprehensive, unconstrained, and exhaustive review of all potential improvements, edge cases, and cross-domain enhancements you can find.
+    This is a Tier 5 brainstorm. Ignore your standard 8-line brevity limits. Provide a comprehensive, unconstrained, and exhaustive review of all potential improvements and edge cases you can find inside your assigned lens. Unconstrained means unconstrained in length and depth, not permission to leave that lens. Anything material outside it still gets one line.
 
 Also include a REQUIRED nested-review directive in every brief. Name one reviewer available to that expert and use this target:
 
-    TARGET: Attack the strongest material assumption in your completed analysis before you finalize it.
+    TARGET: the single assumption your conclusion most depends on
+
+At this tier the analysis does not exist yet when you dispatch, so that names the class of claim to challenge rather than a specific one. Every other tier names a specific claim.
 
 Assign different reviewers across branches when the roster permits it. Each expert must form its own position before invoking its reviewer, then report whether the challenge changed that position. With only one configured model, the reviewer is a fresh-context blind-spot check rather than independent corroboration.
 
-The lens assignment and the out-of-scope list still apply. Unconstrained means unconstrained in length and depth, not permission for two experts to investigate the same thing or bypass the one-reviewer limit.
+The override carries the lens constraint, so no expert can read "unconstrained" as permission to leave its lens. The out-of-scope list you assign still applies, and no expert may investigate what another is already investigating or bypass the one-reviewer limit.
 
 Cost: $Tier5ExpertCost plus $Tier5ReviewerCost, with every branch returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
 
@@ -2949,7 +2994,7 @@ Every expert delegation brief must contain NESTED REVIEW, REVIEWER, and TARGET f
 - $NestedReviewRequiredLine
 - Use AUTHORIZED only for a Tier 4 branch that independently meets Tier 3 conditions.
 - $NestedReviewSkipLine
-- REQUIRED and AUTHORIZED must name one reviewer the expert is allowed to invoke and one concrete target.
+- REQUIRED and AUTHORIZED must name one reviewer the expert is allowed to invoke and one concrete target. Tier 5 is the one exception: it dispatches before any analysis exists, so its target names the class of claim to challenge.
 - SKIP must use REVIEWER: NONE and TARGET: NONE.
 
 Each expert may invoke at most one reviewer once. Reviewers are read-only leaves and cannot invoke another agent. Prefer a reviewer running a different model; describe a same-model reviewer as a fresh-context check, not independent evidence.
@@ -3369,7 +3414,7 @@ function Get-VSCodeStatus
                 {
                     $Result.Version = $Version
 
-                    $CliNames = if ($InstallRoot -match '(?i)Insiders') { @('code-insiders.cmd', 'code-insiders') } else { @('code.cmd', 'code') }
+                    $CliNames = if ((Split-Path -Path $InstallRoot -Leaf) -match '(?i)Insiders$') { @('code-insiders.cmd', 'code-insiders') } else { @('code.cmd', 'code') }
 
                     foreach ($CliName in $CliNames)
                     {
@@ -3512,6 +3557,11 @@ $OriginalVSCodeSettingsState = $null
 $VSCodeSettingWriteState = @{ Attempted = $false; WrittenContent = $null }
 $VSCodeSettingChanged = $false
 
+# Read by the failure handler. Seeded here so a future reordering cannot make Set-StrictMode fault
+# inside the handler and hide the error it was reporting.
+$BackupDirectory = $null
+$ResolvedVSCodeSettingsPath = $null
+
 try
 {
     Write-Console 'Starting adaptive multi-model Copilot council installation.'
@@ -3563,9 +3613,9 @@ if ($Scope -eq 'Workspace')
         throw 'WorkspacePath must be specified when -Scope Workspace is used.'
     }
 
-    if (-not (Test-Path -LiteralPath $WorkspacePath))
+    if (-not (Test-Path -LiteralPath $WorkspacePath -PathType Container))
     {
-        throw "Workspace path does not exist: $WorkspacePath"
+        throw "Workspace path is not an existing directory: $WorkspacePath"
     }
 
     $ResolvedWorkspacePath = (Resolve-Path -LiteralPath $WorkspacePath).Path
@@ -3806,6 +3856,34 @@ else
     Write-Console "Using agent directory: $AgentDirectory"
 }
 
+# A junction or symlink anywhere above the agent files silently redirects every write, and the
+# stale sweep would remove matching files in the link target rather than in the directory the user
+# named. Writing through a deliberate link is supported; deleting through one is not.
+$AgentDirectoryIsLinked = $false
+$AgentDirectoryLinkTarget = $null
+
+for ($LinkProbe = $AgentDirectory; -not [string]::IsNullOrEmpty($LinkProbe); $LinkProbe = Split-Path -Path $LinkProbe -Parent)
+{
+    if (-not (Test-Path -LiteralPath $LinkProbe))
+    {
+        continue
+    }
+
+    $ProbeItem = Get-Item -LiteralPath $LinkProbe -Force -ErrorAction SilentlyContinue
+
+    if ($null -ne $ProbeItem -and $ProbeItem.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint))
+    {
+        $AgentDirectoryIsLinked = $true
+        $AgentDirectoryLinkTarget = $ProbeItem.FullName
+        break
+    }
+}
+
+if ($AgentDirectoryIsLinked)
+{
+    Write-Console "A link in the agent directory path sends writes somewhere else, so stale council files will be left in place rather than deleted through it: $AgentDirectoryLinkTarget" -Level 'Warning'
+}
+
 $BackupDirectory = Join-Path -Path $HOME -ChildPath ".copilot\agent-backups\v5_$(Get-Date -Format 'yyyyMMdd_HHmmssfff')"
 
 # Timestamped per run, so repeated installs never overwrite each other's backups. The folder is
@@ -4001,8 +4079,12 @@ foreach ($AgentFile in $GeneratedAgentFiles)
     [void]$CurrentAgentFiles.Add($AgentFile.FileName)
 }
 
-$StaleAgentFiles = @(Get-ChildItem -LiteralPath $AgentDirectory -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^mm-(expert|reviewer)-.+\.agent\.md$' -and -not $CurrentAgentFiles.Contains($_.Name) })
+$StaleAgentFiles = @(
+    if (-not $AgentDirectoryIsLinked)
+    {
+        Get-ChildItem -LiteralPath $AgentDirectory -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^mm-(expert|reviewer)-.+\.agent\.md$' -and -not $CurrentAgentFiles.Contains($_.Name) }
+    })
 
 $ManagedAgentPaths = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -4256,16 +4338,39 @@ catch
 }
 finally
 {
-    Complete-InstallProgress
+    # Each step is isolated: a throw here would replace the real failure above and leave the user
+    # with a cleanup error instead of the cause.
+    try
+    {
+        Complete-InstallProgress
+    }
+    catch
+    {
+        Write-Verbose "Could not clear the progress display. $($_.Exception.Message)"
+    }
 
     if ($InstallMutexAcquired)
     {
-        [void]$InstallMutex.ReleaseMutex()
+        try
+        {
+            [void]$InstallMutex.ReleaseMutex()
+        }
+        catch
+        {
+            Write-Verbose "Could not release the installer mutex. $($_.Exception.Message)"
+        }
     }
 
     if ($null -ne $InstallMutex)
     {
-        $InstallMutex.Dispose()
+        try
+        {
+            $InstallMutex.Dispose()
+        }
+        catch
+        {
+            Write-Verbose "Could not dispose the installer mutex. $($_.Exception.Message)"
+        }
     }
 }
 

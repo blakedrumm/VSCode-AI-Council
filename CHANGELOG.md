@@ -5,6 +5,71 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.5
+
+Three full council reviews of 5.7.4. Every fix below was reproduced first, and the test suite was
+then mutation-tested: sixteen deliberate defects were injected into a copy of the installer to find
+out which ones the suite failed to notice. Five slipped through, and the tests that should have
+caught them were rewritten.
+
+### Fixed
+
+- **A workspace could still choose which models the council runs.** 5.7.4 restricted the front
+  matter parser but left the prose fallback scanning the whole coordinator file, so a single line in
+  the prompt body still set the roster. Every coordinator this installer writes declares its roster
+  in front matter, so the fallback was removed rather than narrowed.
+- **A real settings.json could not be edited at all.** VS Code accepts keys that differ only by
+  case, and `terminal.integrated.env.windows` holding both `Path` and `PATH` is an ordinary thing to
+  have. PowerShell refuses to build an object from that, so the installer called a valid file
+  invalid and wrote nothing. It now falls back to a dictionary that can represent those keys.
+- **That fallback would not have fired outside English.** It keyed off the text of the error
+  message, which PowerShell translates, so a German or Japanese host would have hit the original
+  failure. The fallback is now structural, and a genuinely malformed file still surfaces the first
+  parser's message rather than the fallback's.
+- **The Windows PowerShell fallback was stricter than the parser it replaced**, refusing settings
+  files above 2 MB or nested deeper than 100 levels. Both limits are now raised explicitly.
+- **A cleanup failure could hide the error it was reporting.** Releasing the installer mutex throws
+  if ownership was lost, and that throw replaced the real failure on its way out. Each cleanup step
+  is now isolated.
+- **The coordinator picker could not be escaped.** It looped forever on any input that was neither
+  empty nor a listed number, which a host whose prompt never blocks will produce indefinitely. It
+  now gives up after 25 attempts, like the model picker.
+- **A path containing the word "insiders" broke VS Code detection.** The flavor test matched the
+  whole install path, so a stable install under such a path looked for the Insiders CLI and reported
+  none. It now tests the install folder name.
+- **A file passed as the workspace was accepted**, producing a nonsensical agent directory and a
+  confusing later failure. It must now be an existing directory.
+
+### Changed
+
+- **The council no longer contradicts itself about Tier 5 review.** The coordinator required every
+  nested-review directive to name a concrete target, then issued a procedural instruction instead of
+  one. Tier 5 dispatches before any analysis exists, so it now names the class of claim to challenge
+  and says why that tier is the exception. The expert prompt now declares that same carve-out, so an
+  expert reading its own schema literally can no longer treat a required Tier 5 review as malformed
+  and skip it. Only the coordinator saw the explanation before.
+- **A Tier 5 brief told experts to leave the lens it had just assigned them.** The override appended
+  to every brief asked for cross-domain findings, while the expert prompt forbids expanding into
+  another expert's lens, and the coordinator's own reminder that the lens still applies was never
+  sent. The lens constraint now lives inside the verbatim override, which is the only part the
+  expert receives.
+- **Reviewers were free to ignore the question they were asked.** A reviewer told to attack the
+  weakest point could substitute its own target for the one the expert supplied, which is the whole
+  value of a targeted review. It now attacks the supplied target first, then reports anything weaker.
+- **A linked agent directory no longer has files deleted through it.** A junction or symlink
+  anywhere in the agent path silently redirects every write, and an experiment confirmed the stale
+  sweep was deleting matching files in the link target rather than in the directory the user named.
+  Writing through a deliberate link still works, because sharing agents between workspaces is a
+  reasonable thing to set up, but the destructive half now stops and says so.
+- The readme documents what a single-model install actually does, rather than describing
+  cross-model review as though it always applies.
+- The suite is 73 tests on PowerShell 7 and Windows PowerShell 5.1, up from 53. New coverage
+  includes the settings-path resolver, the coordinator picker, the update check, expert tool
+  permissions, deletion through a linked directory, a guard that the `-Models` limit still matches
+  the number of review lenses, and the settings rollback itself, which is now exercised by making
+  activation fail after the setting was written.
+  cross-file check that the Tier 5 brief the coordinator emits is one the expert accepts.
+
 ## 5.7.4
 
 Closes the findings the 5.7.2 council review left open, plus one defect found while fixing them.

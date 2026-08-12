@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.7.4-blue" alt="Version 5.7.4">
+  <img src="https://img.shields.io/badge/version-5.7.5-blue" alt="Version 5.7.5">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -57,7 +57,9 @@ Reviewers cannot invoke subagents, which caps nesting at two levels. A recursion
 
 Workers use `user-invocable: false` and `disable-model-invocation: false`: they stay out of the agent picker while remaining available through the coordinator's explicit allowlist. The coordinator cannot itself be recruited as a subagent.
 
-Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 and Tier 5 require that review; Tier 4 authorizes it only for a branch with a material unresolved claim. An expert running Claude can only be challenged by a reviewer running something other than Claude.
+Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 and Tier 5 require that review; Tier 4 authorizes it only for a branch with a material unresolved claim. With more than one model configured, an expert running Claude can only be challenged by a reviewer running something other than Claude.
+
+If you configure only one model, the council adapts rather than pretending otherwise. Tiers 2 and 4 need a second model, so they are marked unavailable. The reviewer still runs, but it is a fresh-context blind-spot check rather than independent corroboration, and the generated prompts say so.
 
 ## The six tiers
 
