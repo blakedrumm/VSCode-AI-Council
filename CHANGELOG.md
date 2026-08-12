@@ -5,6 +5,84 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.9.0
+
+Two Tier 5 reviews, ten expert reports, on two failures the user hit personally: a steered run that
+produced nothing, and runs that stalled for a long time behind one slow model.
+
+### Fixed
+
+- **A steered turn could produce nothing at all, and that was the prompt working as written.** The
+  only start-of-turn instruction in the whole coordinator prompt was "start your next turn by
+  reading that block", and that block was specified to be written at the *end* of a turn. A steering
+  message ends the turn early, so the artifact that existed to survive an interruption was precisely
+  the one an interruption prevented. There was no other branch, so a steered turn fell through to
+  the single remaining instruction, which was to ask permission. The turn now begins by finding work
+  already in flight, using the closing TL;DR as the marker of a finished turn, and rebuilds the
+  outstanding block from the transcript when it is not there. There is always an oldest unanswered
+  message, so there is never a reason to produce nothing.
+- **An interruption used to revoke permission the agent already had.** The one permission gate in
+  the prompt applied only to *resumed* work, while identical fresh work needed no permission at all.
+  Being interrupted therefore downgraded an already-authorized edit into a question. Resuming is now
+  allowed on its own for anything the user already asked for, the destructive-action carve-out is
+  kept, and a question may never be the entire turn.
+- **REDIRECT discarded the whole request on a guess.** It said to drop the outstanding work, on an
+  interpretive classification, with a safe default that covered only question-shaped messages. An
+  instruction-shaped steer such as "also check X" had no default at all. Work set aside is now kept
+  recoverable, instructions default to REFINEMENT unless the words actually withdrew the goal, and
+  when the two readings are close the rule is to keep the work.
+- **The todo list was written after dispatch, so the interruption it existed to survive destroyed
+  it.** It is now written before the first expert is invoked, which is what makes it durable: an
+  interruption yields after the tool call already running.
+
+### Changed
+
+- **Re-dispatching a stalled branch told the coordinator to pay the long wait twice.** The only
+  remedy for a branch that never returned was to re-dispatch it "when the failure looks transient",
+  and a timeout is the most transient-looking failure there is. Branches are now classified by what
+  came back rather than by how long it felt: a STALL is never re-dispatched on the same model and
+  the same brief, a FAILED branch with a real error may be retried once, and the resume path can no
+  longer put a stall back on the queue.
+- **The prompt now states that there is no clock.** A dispatched subagent cannot be polled, timed
+  out, or cancelled, and the turn cannot end until every branch returns, so one slow branch sets the
+  wall clock for the whole tier. Saying so prevents the prompt from drifting toward timeout policies
+  that cannot exist, and the announcement now warns when a long wait is expected and names Stop and
+  Send as the only abort, so a slow run is legible rather than frightening.
+- **A preview model gets the narrowest brief that still covers its lens.** Measured across this
+  session: the preview expert returned nothing on two large briefs and returned normally on the
+  shortest one it was given.
+- **The three interjection modes were replaced with a test the agent can actually apply.** It cannot
+  see which control the user pressed, but it can see whether a dispatched expert's report is in the
+  transcript, and that single observation covers every way a turn can be cut short.
+- The prompt no longer claims that only the synthesis is lost to an interruption. Edits that landed
+  are still applied and commands that ran still ran, so anything not safely repeatable is checked
+  before it is repeated.
+
+### Added
+
+- **The installer warns when a preview or experimental model takes a seat.** VS Code publishes no
+  preview field of its own, which was confirmed against the VS Code source, so the marker is read
+  from the display name and from the model id, the latter because it survives a rename. The warning
+  is raised where all four selection paths converge rather than in the picker, since explicit
+  models, a reused installation, and the unattended default all bypass the picker, and reuse is
+  exactly how a preview model persists across re-runs unnoticed.
+- **Preview status is a tiebreaker after version, and deliberately not part of the size score.**
+  Size feeds a hard exclusion filter and also ranks vendors against each other, so demoting a
+  preview model there could have dropped an entire vendor from the roster. That would have bought
+  speed with independence, which is the one trade this tool exists to refuse. A vendor whose only
+  agent-capable model is in preview still keeps its seat.
+
+The suite is 108 tests. Seventeen mutations were run against the new assertions and every one was
+caught on the first pass. The coordinator prompt grew from 18,919 to 22,110 bytes, which is a real
+cost paid on every turn; it buys the difference between resuming an interrupted run and losing it.
+
+### Note on the reviews themselves
+
+The architecture expert, running a preview model, returned nothing on two of its three dispatches
+and succeeded only on the shortest brief. Rather than re-dispatch it a third time, the same policy
+this release introduces was applied to the review that produced it: the stall was named, the lens
+was reassigned, and the gap was recorded.
+
 ## 5.8.0
 
 A five-lens review of the generated prompts, one expert per configured model. Two of its

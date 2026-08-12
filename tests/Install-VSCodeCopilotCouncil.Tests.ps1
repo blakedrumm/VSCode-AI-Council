@@ -24,6 +24,7 @@ BeforeAll {
         'Backup-ExistingFile',
         'Remove-ExpiredBackup',
         'Test-ModelName',
+        'Test-PreviewModelName',
         'ConvertTo-AgentSlug',
         'Get-PropertyValue',
         'Initialize-SqliteInterop',
@@ -1242,7 +1243,7 @@ Describe 'End-to-end workspace install' {
         $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
 
         # A rate-limited expert silently removes a lens while the answer still looks complete.
-        $Coordinator | Should -Match '### When a branch dies'
+        $Coordinator | Should -Match '### When a branch fails or stalls'
         $Coordinator | Should -Match 'agreement among the survivors'
 
         # A result already in hand can make a planned branch pointless before it is dispatched.
@@ -1421,6 +1422,73 @@ Describe 'End-to-end workspace install' {
 
         # A degraded expert report is as invisible as a branch that never returned.
         $Coordinator | Should -Match 'A polished narrative is not one of the required fields'
+    }
+
+    It 'can resume a turn that was cut off before it could write anything down' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # The only start-of-turn instruction used to be gated on a block written at turn end, which
+        # a steering message prevents. The entry point must not depend on any artifact.
+        $Coordinator | Should -Match 'Start every turn by finding the work already in flight'
+        $Coordinator | Should -Match 'never a reason to produce nothing'
+        $Coordinator | Should -Match 'rebuild it from the transcript when it is not'
+
+        # An interruption used to revoke permission the agent already had, so the only reachable
+        # behavior after a steer was to ask and stop.
+        $Coordinator | Should -Match 'An interruption does not withdraw permission you already had'
+        $Coordinator | Should -Match 'never let a question be the entire turn'
+
+        # Dropping is irreversible and the classification is a guess, so it must stay recoverable.
+        $Coordinator | Should -Match 'keep it recoverable so they can ask for it back'
+        $Coordinator | Should -Match 'when the readings are close, keep the work'
+
+        # A todo written after dispatch is lost by the interruption it exists to survive.
+        $Coordinator | Should -Match 'before you invoke the first expert'
+
+        # The agent cannot see which control was pressed, so the test has to be observable.
+        $Coordinator | Should -Match 'You cannot see which control the user pressed'
+    }
+
+    It 'never pays a stalled branch twice' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # A timeout is the most transient-looking failure there is, so the old remedy of
+        # re-dispatching a transient failure told the coordinator to pay the long wait twice.
+        $Coordinator | Should -Match 'Do not re-dispatch the same model on the same brief'
+        $Coordinator | Should -Not -Match 're-dispatch it once when the failure looks transient'
+        $Coordinator | Should -Match 'STALL:'
+
+        # The resume path is the other way back into the same trap.
+        $Coordinator | Should -Match 'does not go back on NEED for the same model and the same brief'
+
+        # No clock and no cancel, so any budget the prompt implied would be fiction.
+        $Coordinator | Should -Match 'one slow branch sets the wall clock for the entire tier'
+        $Coordinator | Should -Match 'Stop and Send is the user'
+
+        # The user watched a run and could not tell whether it was progressing or hung.
+        $Coordinator | Should -Match 'Expect a long wait'
+
+        # Measured this session: the preview model returned only on the shortest brief it was given.
+        $Coordinator | Should -Match 'elevated latency risk'
+        $Coordinator | Should -Match 'narrowest brief that still covers its lens'
     }
 
     It 'keeps the single-model debate fallback honest' {

@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.8.0
+        5.9.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -317,7 +317,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.8.0'
+$ScriptVersion = '5.9.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -1011,6 +1011,32 @@ function Test-ModelName
     return ($Name -match '^[A-Za-z0-9]')
 }
 
+# Reports whether a model is a preview or experimental release. The VS Code metadata carries no
+# preview field, so the marker vendors put in the display name and in the model id is the only
+# signal that reaches this script. The id is read too because it survives a marketing rename.
+function Test-PreviewModelName
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]
+        $Name,
+
+        [Parameter()]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]
+        $Id
+    )
+
+    # Separators on both sides, so Previewer and Betamax do not match.
+    $Marker = '(?i)(^|[\s\-\(\[])(preview|beta|experimental|early access)([\s\-\)\]]|$)'
+
+    return ($Name -match $Marker) -or ($Id -match $Marker)
+}
+
 # Turns a model name into a safe file name fragment, for example "GPT-5.6 Sol" to "gpt-5-6-sol".
 function ConvertTo-AgentSlug
 {
@@ -1364,9 +1390,11 @@ function Get-CachedModelRecord
                             {
                                 # VS Code publishes powerful, versatile, or lightweight per model. That beats
                                 # inferring size from the name, which carries no signal for names like Luna.
+                                # It publishes nothing at all for preview status, hence the name and id check.
                                 $Records.Add([PSCustomObject]@{
                                         Name = $Name
                                         Category = [string](Get-PropertyValue -InputObject $Metadata -Name 'category')
+                                        IsPreview = (Test-PreviewModelName -Name $Name -Id ([string](Get-PropertyValue -InputObject $Metadata -Name 'id')))
                                     })
                             }
                         }
@@ -1714,7 +1742,8 @@ function Get-ModelVersion
 #
 # The algorithm, in order:
 #   1. Discard the Auto router and every reduced-size model.
-#   2. Rank what is left by tier, then vendor, then version within that vendor.
+#   2. Rank what is left by tier, then vendor, then version within that vendor, then stable ahead of
+#      preview when one vendor ships both at the same version.
 #   3. Take the best model from each vendor first, which is the whole point of the exercise.
 #   4. Only once vendors run out, fill the remaining slots, preferring a coding specialist over
 #      another general model from a vendor that is already represented.
@@ -1734,12 +1763,22 @@ function Get-RecommendedModelSet
         [Parameter()]
         [AllowNull()]
         [hashtable]
-        $CategoryMap
+        $CategoryMap,
+
+        [Parameter()]
+        [AllowNull()]
+        [hashtable]
+        $PreviewMap
     )
 
     if ($null -eq $CategoryMap)
     {
         $CategoryMap = @{}
+    }
+
+    if ($null -eq $PreviewMap)
+    {
+        $PreviewMap = @{}
     }
 
     $SeenCatalogNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
@@ -1760,6 +1799,7 @@ function Get-RecommendedModelSet
                     Family = Get-ModelFamily -Name $_
                     Tier = Get-ModelTierWeight -Name $_ -Category $Category
                     Version = Get-ModelVersion -Name $_
+                    Preview = $(if ($PreviewMap.ContainsKey($_)) { [bool]$PreviewMap[$_] } else { Test-PreviewModelName -Name $_ })
                     Specialist = [bool]($_ -match '(?i)codex|(^|[\s\-])code([\s\-]|$)')
                 }
             } |
@@ -1786,10 +1826,13 @@ function Get-RecommendedModelSet
         $FamilyRank[$FamilyOrder[$Index].Name] = $Index
     }
 
+    # Preview sorts only after version, so it can separate two releases of one vendor but can never
+    # cost that vendor its seat. Tier is a hard filter, which is why preview stays out of it.
     $Ranked = @($Candidates | Sort-Object -Property `
         @{ Expression = 'Tier'; Descending = $true },
         @{ Expression = { $FamilyRank[$_.Family] }; Descending = $false },
         @{ Expression = 'Version'; Descending = $true },
+        @{ Expression = 'Preview'; Descending = $false },
         @{ Expression = 'Name'; Descending = $false })
 
     $Chosen = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
@@ -1819,6 +1862,7 @@ function Get-RecommendedModelSet
                 @{ Expression = { -not $_.Specialist } },
             @{ Expression = 'Tier'; Descending = $true },
             @{ Expression = 'Version'; Descending = $true },
+            @{ Expression = 'Preview'; Descending = $false },
             @{ Expression = 'Name'; Descending = $false })
 
         foreach ($Candidate in $Remaining)
@@ -2983,6 +3027,12 @@ For any tier above Tier 0, post this announcement BEFORE you invoke a single exp
 
 Post it as visible output, not as a thought. If you escalate later, announce the new tier and the evidence that forced the change.
 
+When any dispatched expert runs a preview or experimental model, or the tier uses REQUIRED review, add one line so a long wait is legible rather than frightening:
+
+    Expect a long wait. One slow branch holds the whole tier, and Stop and Send is the only way to abort it.
+
+Do not promise progress updates while you are blocked on subagents. You cannot emit any.
+
 ### Tier 0 - Answer directly, no subagents
 
 Use when:
@@ -3053,45 +3103,47 @@ Cost: $Tier5ExpertCost plus $Tier5ReviewerCost, with every branch returning a lo
 - De-escalate immediately when early evidence resolves the question. If a result that already returned makes a branch you have not dispatched yet pointless, drop that branch and say why.
 - Never assign a scope another expert already covered, and if two experts would receive the same brief, invoke one.
 
-### When a branch dies
+### When a branch fails or stalls
 
-An expert can fail outright, hit a rate limit, or come back with nothing usable. That removes a lens while the final answer still looks complete, so it is the failure the user is least able to notice.
+Classify a branch that did not deliver by what came back, not by how long it felt. You have no clock, and you cannot cancel a subagent once it is dispatched.
 
-Name the dead branch and the lens now uncovered, then do one of these and say which: re-dispatch it once when the failure looks transient and the lens is load-bearing, reassign its scope to a surviving expert, or continue without it and record the gap as unresolved.
+- STALL: an empty or unusable return with no error attached. Do not re-dispatch the same model on the same brief in this run. A stall costs the whole wait again, and a timeout is the most transient-looking failure there is, so the obvious remedy is the expensive one. Reassign the lens to a surviving expert or record the gap.
+- FAILED: an explicit error or a rate limit. One re-dispatch is allowed when the lens is load-bearing and no survivor can cover it.
+- DEGRADED: a report that omits its CAPABILITY, VERIFIED, and UNVERIFIED lines, or that claims to have run something from a branch with no terminal. Keep it, treat its empirical claims as unverified, and do not re-dispatch it to make it tidier. A polished narrative is not one of the required fields.
 
-A report that omits its CAPABILITY, VERIFIED, and UNVERIFIED lines, or that claims to have run something from a branch with no terminal, is degraded in the same way. Treat its empirical claims as unverified. A polished narrative is not one of the required fields.
+Name the branch, its class, and the lens now uncovered, then say which remedy you chose. Never let agreement among the survivors stand in for the lens that never reported.
 
-Never let agreement among the survivors stand in for the lens that never reported.
+Dispatched subagents run concurrently, but your turn cannot end until every one of them returns, so one slow branch sets the wall clock for the entire tier. You cannot poll it, time it out, or cancel it, and Stop and Send is the user's only abort. Everything you actually control happens before you dispatch: who you send, and how narrow their brief is.
 
 ## Interruption and resume
 
-The user can interject while a run is in flight, and the three ways they can do it mean different things:
+Start every turn by finding the work already in flight, before you plan anything new. A user message that never received a final answer from you is still owed, and your own closing TL;DR is the marker that a turn finished. Work through anything still owed oldest first. The oldest one always exists, so you always have a resume point and never a reason to produce nothing. A newer message does not cancel an older request, and if you answer only the newest one, say in one line what became of the older one.
 
-- A queued message lets your turn finish first. Nothing is lost.
-- A steering message makes your turn yield after the tool call that is currently executing. Experts that already returned are still in the transcript. The synthesis is what was lost.
-- Stop and Send cancels the turn outright. Any expert that had not returned is gone and can only be recovered by dispatching it again.
+You cannot see which control the user pressed, so read the transcript instead. An expert whose report you can see returned. An expert you dispatched whose report you cannot see never returned and has to be dispatched again. That one test covers every way a turn can be cut short, so you never need to know which one happened.
+
+An interruption does not undo work that already finished. Edits that landed are still applied and commands that ran still ran, so before repeating anything that is not safely repeatable, check whether it already happened: read the file before editing it again, look for the commit before making it again, and never re-dispatch an expert whose report is already in the transcript.
 
 Classify every interjection in one line and name the class you chose:
 
-- REDIRECT: the goal itself changed. Drop the outstanding work and say what you dropped.
+- REDIRECT: the user withdrew the goal. Set the old work aside, say what you set aside, and keep it recoverable so they can ask for it back.
 - REFINEMENT: the goal stands and the constraints changed. Keep the expert results that are still valid. Re-dispatch only the ones the new constraint invalidated.
-- DETOUR: a genuine side question. Answer it, then resume the outstanding work in the same turn when that is cheap, or at the top of the next turn.
+- DETOUR: a genuine side question. Answer it, then continue the outstanding work in the same reply.
 
-Default to DETOUR when the interjection is a question rather than an instruction. Never silently drop work. If you are not resuming, say so and say why.
+A question is a DETOUR. An instruction is a REFINEMENT unless you can quote the words that withdrew the original goal. Keeping unwanted work costs tokens, while dropping wanted work costs the user the whole request, so when the readings are close, keep the work.
 
 ### Outstanding work
 
-Above Tier 0, track the run as a todo list, one item per dispatched expert plus one for synthesis. Update it as each expert returns. The list survives an interruption, so it is your resume point.
+Above Tier 0, write the run as a todo list before you invoke the first expert, one item per expert plus one for synthesis, and mark each one done as its report arrives. Writing it first is the point: an interruption yields after the tool call that is already running, so a todo written before dispatch survives, while a summary you meant to write at the end of the turn is never written at all. At Tier 0, when the work will take more than a couple of tool calls, say in one line what you are about to do before you do it, because that sentence is all an interrupted Tier 0 turn leaves behind.
 
-End any turn that leaves work unfinished with:
+When a turn does reach its end with work unfinished, close it with:
 
     OUTSTANDING: what is still owed, one line
     HAVE: experts that already returned
     NEED: experts still to dispatch or re-dispatch
 
-Start your next turn by reading that block and continuing from it. Never re-dispatch an expert whose result you can still see in the transcript.
+Use that block when it is there and rebuild it from the transcript when it is not, because an interrupted turn never reached its ending and could not write it. The tier announcement lists everyone you dispatched, and anyone on that list without a visible report is a NEED. A branch that stalled does not go back on NEED for the same model and the same brief.
 
-Resume research and synthesis on your own. Before resuming anything that edits files or runs terminal commands, restate the pending action in one line and get a yes first.
+Resume on your own: research, dispatching experts, synthesis, and any edit or command the user already asked for. An interruption does not withdraw permission you already had. Ask first only when the interjection put the pending action itself in doubt, when the goal changed, or when the action is destructive or hard to undo. When you do ask, keep working on everything the question does not block, and never let a question be the entire turn. When you resume a fan-out, announce only the experts you are dispatching again and name the ones you are not.
 
 ## Delegation brief
 
@@ -3107,6 +3159,8 @@ Every expert invocation must include:
 Never tell an expert to "look at the repo". Give it the entry points.
 
 Every branch pays separately for whatever you leave out. Five experts each spending three calls to rediscover the same build command is the most common waste in a fan-out, so put the shared facts in every brief even when they feel too obvious to write down.
+
+A model whose name says Preview or Experimental is an elevated latency risk. Still dispatch it when its lens is in scope, and shrink its critical path instead: give it the narrowest brief that still covers its lens, put every shared fact in it, and prefer NESTED REVIEW: SKIP on that branch wherever the tier allows it.
 
 Invoke independent experts in a single turn so they run concurrently. Never serialize independent work.
 
@@ -3823,6 +3877,7 @@ Complete-InstallStep
 # from it is worth warning about.
 $Discovered = $false
 $ModelCategoryMap = @{}
+$ModelPreviewMap = @{}
 
 if ($CatalogWasSupplied)
 {
@@ -3847,6 +3902,7 @@ else
         foreach ($CatalogRecord in $CatalogRecords)
         {
             $ModelCategoryMap[$CatalogRecord.Name] = $CatalogRecord.Category
+            $ModelPreviewMap[$CatalogRecord.Name] = $CatalogRecord.IsPreview
         }
 
         $Discovered = $true
@@ -3869,7 +3925,7 @@ Start-InstallStep -Name 'Select models'
 #   3. the interactive picker
 #   4. the built-in defaults, only when unattended with nothing else to go on
 $LensTitles = @($LensCatalog | ForEach-Object { $_.Title })
-$RecommendedModels = @(Get-RecommendedModelSet -Catalog $Catalog -MaximumCount $MaxModelCount -CategoryMap $ModelCategoryMap)
+$RecommendedModels = @(Get-RecommendedModelSet -Catalog $Catalog -MaximumCount $MaxModelCount -CategoryMap $ModelCategoryMap -PreviewMap $ModelPreviewMap)
 $PreviousConfiguration = $null
 $ReusedPreviousConfiguration = $false
 
@@ -4005,6 +4061,17 @@ elseif ($ModelsWereSupplied)
 if ($SelectedModels -contains 'Auto')
 {
     Write-Warning 'Auto is a router, not a fixed model. An Auto expert can be routed onto the same underlying model as another expert or as its own reviewer, which removes the independence the council depends on. Auto is safe for the coordinator, where it only orchestrates.'
+}
+
+# Checked here rather than in the picker: -Models, a reused installation, and the unattended default
+# all bypass the picker, and reuse is exactly how a preview model persists across re-runs unnoticed.
+$PreviewSelections = @(@($SelectedModels) + $ResolvedCoordinatorModel |
+        Select-Object -Unique |
+        Where-Object { Test-PreviewModelName -Name $_ })
+
+if ($PreviewSelections.Count -gt 0)
+{
+    Write-Warning "Preview or experimental models are configured: $($PreviewSelections -join ', '). A preview model can be re-tuned, rate limited, or withdrawn without notice, and can be markedly slower than its stable sibling. A parallel tier finishes no sooner than its slowest expert."
 }
 
 if ($ReusedPreviousConfiguration)
