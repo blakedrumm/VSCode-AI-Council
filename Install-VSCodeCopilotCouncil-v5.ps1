@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.7
+        5.7.8
 
     Compatible with:
         Windows PowerShell 5.1
@@ -317,7 +317,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.7'
+$ScriptVersion = '5.7.8'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -2757,10 +2757,12 @@ The coordinator publishes your position to the user, so write for that audience.
     KEY EVIDENCE: the file, line, test, or observed behavior that decided it
     VERIFIED: what you proved in this branch, and what proved it
     UNVERIFIED: what you could not prove, each with the exact check that would settle it
-    DISAGREES WITH: the expert or assumption you contradict, or None
+    CONTRADICTS: the briefed claim or common assumption you are overturning, or None
     OPEN QUESTION: what stays unverified, or None
 
-The VERIFIED and UNVERIFIED split is the most useful thing you produce. A claim you reasoned your way to is not the same as a claim you watched happen, and the coordinator holds the terminal you may not have. When you cannot settle something yourself, hand up the command, test, or experiment that would settle it, and say what result would prove you wrong. A precise falsification plan is worth more than another paragraph of argument.
+The VERIFIED and UNVERIFIED split is the most useful thing you produce. A claim you reasoned your way to is not the same as a claim you watched happen, and the coordinator holds the terminal you may not have. When you cannot settle something yourself, hand up the command, test, or experiment that would settle it, and say what result would prove you wrong. For a test you are recommending, that means naming what to break so the test fails. A precise falsification plan is worth more than another paragraph of argument.
+
+You cannot see the other experts or anything they found, so never guess at their positions. CONTRADICTS names something in your own brief, or an assumption a reader would otherwise hold.
 
 Then use at most eight lines for:
 
@@ -2861,6 +2863,8 @@ Fan out one expert per configured model, each with its own lens and its own scop
 
 Nested review is off by default. Include NESTED REVIEW: SKIP for every branch unless that branch independently meets the Tier 3 conditions and no cheaper evidence can settle it. For a qualifying branch, include NESTED REVIEW: AUTHORIZED, name one configured reviewer, and name the exact target to challenge.
 
+Tier 5 dispatches this same roster, so choosing between the two is choosing how much depth to ask for, not how many models to use.
+
 Cost: up to $ExpertCount parallel expert calls, plus at most one reviewer call for each explicitly authorized branch.
 "@
 
@@ -2910,7 +2914,7 @@ Reviewers are leaf agents. They have no subagent tool, so nesting depth is cappe
 
 Start at the lowest tier that can produce a correct answer from the evidence you already have. Change tier only when new evidence justifies it, and say so when you do.
 
-A claim a tool can decide is not settled until you run the tool. That holds at every tier, including Tier 0, and it is usually cheaper than dispatching anyone.
+A claim a tool can decide is not settled until you run the tool. That holds at every tier, including Tier 0. Before dispatching anyone, spend the one or two calls that could collapse the question outright, because one command that settles it beats five experts arguing about what it would have said.
 
 Tiers 3, 4, and 5 are exceptions, not defaults. If you cannot name the specific trigger that requires one, you are at the wrong tier.
 
@@ -2983,21 +2987,28 @@ Append this override verbatim to EVERY delegation brief you send in this tier:
 
 Also include a REQUIRED nested-review directive in every brief. Name one reviewer available to that expert and use this target:
 
-    TARGET: the single assumption your conclusion most depends on
+    TARGET: the load-bearing claim in your conclusion that you were least able to verify yourself
 
-At this tier the analysis does not exist yet when you dispatch, so that names the class of claim to challenge rather than a specific one. Every other tier names a specific claim.
+At this tier the analysis does not exist yet when you dispatch, so that names the class of claim to challenge rather than a specific one. Every other tier names a specific claim. Pointing the reviewer at what the expert could not check is what keeps the extra call from confirming something already proven.
 
-Assign different reviewers across branches when the roster permits it. Each expert must form its own position before invoking its reviewer, then report whether the challenge changed that position. With only one configured model, the reviewer is a fresh-context blind-spot check rather than independent corroboration.
+Assign different reviewers across branches when the roster permits it. Each expert must form its own position before invoking its reviewer, then report whether the challenge changed that position.
 
 Cost: $Tier5ExpertCost plus $Tier5ReviewerCost, with every branch returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
 
 ### Escalation rules
 
 - Escalate one tier at a time, and only when the extra call can change the outcome.
-- De-escalate immediately when early evidence resolves the question.
-- Never assign a scope that another expert already covered.
+- De-escalate immediately when early evidence resolves the question. If a result that already returned makes a branch you have not dispatched yet pointless, drop that branch and say why.
+- Never assign a scope another expert already covered, and if two experts would receive the same brief, invoke one.
 - Never invoke an expert to confirm something a single tool call can verify.
-- If two experts would receive the same brief, invoke one.
+
+### When a branch dies
+
+An expert can fail outright, hit a rate limit, or come back with nothing usable. That removes a lens while the final answer still looks complete, so it is the failure the user is least able to notice.
+
+Name the dead branch and the lens now uncovered, then do one of these and say which: re-dispatch it once when the failure looks transient and the lens is load-bearing, reassign its scope to a surviving expert, or continue without it and record the gap as unresolved.
+
+Never let agreement among the survivors stand in for the lens that never reported.
 
 ## Interruption and resume
 
@@ -3025,7 +3036,7 @@ End any turn that leaves work unfinished with:
     HAVE: experts that already returned
     NEED: experts still to dispatch or re-dispatch
 
-Start your next turn by reading that block and continuing from it. Reuse results that are already in the transcript. Never re-dispatch an expert whose result you can still see.
+Start your next turn by reading that block and continuing from it. Never re-dispatch an expert whose result you can still see in the transcript.
 
 Resume research and synthesis on your own. Before resuming anything that edits files or runs terminal commands, restate the pending action in one line and get a yes first.
 
@@ -3037,13 +3048,12 @@ Every expert invocation must include:
 - the assigned lens and an explicit out-of-scope list
 - file paths, symbols, and commands you already discovered
 - constraints such as language, framework, versions, style, and compatibility
-- what you already verified, so it is not repeated
-- findings already established earlier in this session, so nothing is investigated twice
+- everything already verified, in this turn or earlier in the session, so nothing is investigated twice
 - the exact deliverable you want back
 
 Never tell an expert to "look at the repo". Give it the entry points.
 
-Carry verified findings forward across turns. Do not re-investigate something an expert already settled unless the code changed.
+Every branch pays separately for whatever you leave out. Five experts each spending three calls to rediscover the same build command is the most common waste in a fan-out, so put the shared facts in every brief even when they feel too obvious to write down.
 
 Invoke independent experts in a single turn so they run concurrently. Never serialize independent work.
 
@@ -3057,7 +3067,7 @@ Every expert delegation brief must contain NESTED REVIEW, REVIEWER, and TARGET f
 - REQUIRED and AUTHORIZED must name one reviewer the expert is allowed to invoke and one concrete target. Tier 5 is the one exception: it dispatches before any analysis exists, so its target names the class of claim to challenge.
 - SKIP must use REVIEWER: NONE and TARGET: NONE.
 
-Each expert may invoke at most one reviewer once. Reviewers are read-only leaves and cannot invoke another agent. Prefer a reviewer running a different model; describe a same-model reviewer as a fresh-context check, not independent evidence.
+Each expert may invoke at most one reviewer once. Prefer a reviewer running a different model; describe a same-model reviewer as a fresh-context check, not independent evidence.
 
 Before dispatch, include the number of planned reviewer calls in the visible tier announcement. If a required reviewer is unavailable or fails, report the failure and remaining uncertainty. Do not silently retry or substitute another reviewer.
 
@@ -3091,8 +3101,11 @@ After changes:
 
 - run the targeted tests
 - run build or syntax validation when applicable
+- when you added a test, break what it covers, watch it fail, then put the code back
 - review the final diff
 - fix regressions you introduced before returning
+
+A passing test proves nothing until you have seen it fail for the right reason. That one mutation is worth more than any number of experts reading the test and agreeing it looks correct.
 
 ## Final response
 

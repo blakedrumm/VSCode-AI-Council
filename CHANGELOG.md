@@ -5,6 +5,47 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.8
+
+5.7.7 taught the council to tell proof from belief. This release fixes the remaining findings from
+the same review, which were all about work the council wasted or coverage it lost without noticing.
+Again, nothing about the installer changes.
+
+### Changed
+
+- **A branch that never reports no longer disappears quietly.** An expert can fail outright, hit a
+  rate limit, or come back with nothing usable, and the coordinator had no instruction covering it.
+  The lens simply vanished while the final answer still looked complete, which makes it the failure
+  a reader is least able to notice. The coordinator now names the dead branch and the uncovered
+  lens, then re-dispatches it once, reassigns its scope, or records the gap as unresolved. Agreement
+  among the survivors never stands in for the lens that never reported.
+- **Cheap evidence is spent before model calls are.** The coordinator now spends the one or two tool
+  calls that could collapse a question outright before it dispatches anyone, because one command
+  that settles the matter beats five experts arguing about what it would have said. Related: a
+  result already in hand can now cancel a branch that has not been dispatched yet.
+- **Parallel branches stop rediscovering the same facts.** Experts cannot see each other, so
+  anything missing from the brief is paid for once per branch. Five experts each spending three
+  calls to find the same build command was the most common waste in a fan-out, so the shared facts
+  now go in every brief even when they feel too obvious to write down.
+- **Experts no longer guess about agents they cannot see.** The report field asking which expert
+  they disagreed with required inventing the other branches' positions, since parallel experts have
+  no view of each other. It now names a claim from their own brief, or an assumption a reader would
+  otherwise hold.
+- **The Tier 5 review aims at what the expert could not check.** Pointing the single review each
+  branch gets at a claim the expert had already proven wasted it.
+- **Tier 4 and Tier 5 dispatch the same roster**, and the coordinator now says so, so choosing
+  between them is understood as a choice about depth rather than about how many models to use.
+- **A new test is broken before it is trusted.** After adding a test, the coordinator now breaks
+  what it covers, watches it fail, and puts the code back. A passing test proves nothing until it
+  has been seen to fail for the right reason. This rule exists because a single mutation run found
+  seven coverage holes in this repository that five experts reading the same tests predicted none
+  of, which is the clearest evidence in the whole review that more readers are not the answer.
+- The three additions that grew the always-on coordinator prompt were partly paid for by removing
+  statements it already made elsewhere.
+
+The suite is now 99 tests. The assertions added here were themselves mutation tested: each of the
+ten new rules was broken in turn and every break was caught.
+
 ## 5.7.7
 
 This release changes what the council is instructed to think, not what the installer does. Every

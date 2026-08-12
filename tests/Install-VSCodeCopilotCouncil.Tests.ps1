@@ -1018,7 +1018,7 @@ Describe 'End-to-end workspace install' {
         # Tier 5 dispatches before any analysis exists, so the coordinator names a class of claim.
         # The expert never receives the coordinator's explanation of that carve-out, so its own schema
         # has to admit the shape or it will read a REQUIRED directive as malformed and skip the review.
-        $Coordinator | Should -Match 'TARGET: the single assumption your conclusion most depends on'
+        $Coordinator | Should -Match 'TARGET: the load-bearing claim in your conclusion that you were least able to verify yourself'
         $Expert | Should -Match 'a class of claim at Tier 5, or NONE'
         $Expert | Should -Match 'Never downgrade it to SKIP\.'
         $Expert | Should -Match 'Tier 5 uses? REQUIRED'
@@ -1224,6 +1224,71 @@ Describe 'End-to-end workspace install' {
         $Coordinator | Should -Match 'uncontested claim deserves that same scrutiny'
         $Coordinator | Should -Match 'not settled until you run the tool'
         $Coordinator | Should -Match 'share one blind spot'
+    }
+
+    It 'tells the coordinator what to do with a branch that never reports' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # A rate-limited expert silently removes a lens while the answer still looks complete.
+        $Coordinator | Should -Match '### When a branch dies'
+        $Coordinator | Should -Match 'agreement among the survivors'
+
+        # A result already in hand can make a planned branch pointless before it is dispatched.
+        $Coordinator | Should -Match 'have not dispatched yet pointless'
+    }
+
+    It 'spends cheap evidence before it spends model calls' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        $Coordinator | Should -Match 'beats five experts arguing'
+
+        # Parallel branches cannot see each other, so anything omitted is re-derived N times.
+        $Coordinator | Should -Match 'Every branch pays separately'
+
+        # Reviewing a claim the expert already proved wastes the one review it gets.
+        $Coordinator | Should -Match 'least able to verify yourself'
+
+        # Tier 4 and Tier 5 dispatch the same roster, which is a depth choice, not a size choice.
+        $Coordinator | Should -Match 'dispatches this same roster'
+
+        # Five readers agreeing a test looks correct is not evidence that it can fail.
+        $Coordinator | Should -Match 'break what it covers, watch it fail'
+    }
+
+    It 'never asks an expert to guess at agents it cannot see' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+
+        # Experts run in parallel with no view of each other, so naming one was always a guess.
+        $Expert | Should -Match '(?m)^    CONTRADICTS:'
+        $Expert | Should -Not -Match 'DISAGREES WITH'
+        $Expert | Should -Match 'never guess at their positions'
     }
 
     It 'refuses a workspace path that is a file rather than a directory' {
