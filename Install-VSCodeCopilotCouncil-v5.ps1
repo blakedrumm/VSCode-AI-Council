@@ -173,7 +173,7 @@
         August 11th, 2026
 
     Version:
-        5.7.6
+        5.7.7
 
     Compatible with:
         Windows PowerShell 5.1
@@ -317,7 +317,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.7.6'
+$ScriptVersion = '5.7.7'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -2559,6 +2559,8 @@ Attack the supplied conclusion where it is weakest, then state what you would co
 
 If the expert named a target, attack that first, then say whether you found something weaker. A targeted challenge is the reason you were invoked, so do not silently substitute your own.
 
+You were handed the expert's own summary of its work, which is the version most favourable to its conclusion. You have read and search tools: go look at the artifact yourself rather than reasoning only from that summary. Check the lines around any line it cited, because a comment or test stating why the code is the way it is refutes a proposal faster than any argument. Disagreeing with the framing you were given is a legitimate result.
+
 Evaluate:
 
 - factual and technical correctness
@@ -2677,10 +2679,21 @@ Report anything materially wrong outside your lens in one line. Do not expand in
 
 1. Read the delegation brief. Do not redo work the coordinator already verified.
 2. Narrate your progress. Before each significant search or tool call, state in one line what you are checking, for example "Scanning Get-VSCodeStatus for Windows-only path assumptions". Never work silently.
-3. Gather only the evidence that can change your answer. Stop searching once you can act.
-4. Form your own position before considering any other model.
-5. Name your assumptions and your remaining uncertainty.
-6. Identify the strongest competing alternative and why you rejected it.
+3. Gather the evidence that can change your answer, and at least one check that could disprove it. Stop when a disconfirming check has failed to break your claim, not when the claim first looks right.
+4. Before proposing a change to existing code, read what surrounds it. A comment, a test, or a commit message stating why it is written that way is the cheapest possible refutation of your proposal, and skipping it is the most common way a confident recommendation turns out to be wrong.
+5. Form your own position before considering any other model.
+6. Name your assumptions and your remaining uncertainty.
+7. Identify the strongest competing alternative and why you rejected it.
+
+## What you can actually do
+
+Your tools decide what you are entitled to claim. Check what is available before you rely on it, and never describe reading a test as running it, or reading a command as executing it.
+
+Open your report with one line, and do not otherwise dwell on it:
+
+    CAPABILITY: the tools you actually used; verification=executed | static-only
+
+Use static-only when you could not run anything. That is a normal, useful result. Presenting inference as observation is not.
 
 ## Controlled cross-model review
 
@@ -2742,8 +2755,12 @@ The coordinator publishes your position to the user, so write for that audience.
     STANCE: your position in one sentence
     CONFIDENCE: High | Medium | Low
     KEY EVIDENCE: the file, line, test, or observed behavior that decided it
+    VERIFIED: what you proved in this branch, and what proved it
+    UNVERIFIED: what you could not prove, each with the exact check that would settle it
     DISAGREES WITH: the expert or assumption you contradict, or None
     OPEN QUESTION: what stays unverified, or None
+
+The VERIFIED and UNVERIFIED split is the most useful thing you produce. A claim you reasoned your way to is not the same as a claim you watched happen, and the coordinator holds the terminal you may not have. When you cannot settle something yourself, hand up the command, test, or experiment that would settle it, and say what result would prove you wrong. A precise falsification plan is worth more than another paragraph of argument.
 
 Then use at most eight lines for:
 
@@ -2893,6 +2910,8 @@ Reviewers are leaf agents. They have no subagent tool, so nesting depth is cappe
 
 Start at the lowest tier that can produce a correct answer from the evidence you already have. Change tier only when new evidence justifies it, and say so when you do.
 
+A claim a tool can decide is not settled until you run the tool. That holds at every tier, including Tier 0, and it is usually cheaper than dispatching anyone.
+
 Tiers 3, 4, and 5 are exceptions, not defaults. If you cannot name the specific trigger that requires one, you are at the wrong tier.
 
 ### Announce before you dispatch
@@ -2970,8 +2989,6 @@ At this tier the analysis does not exist yet when you dispatch, so that names th
 
 Assign different reviewers across branches when the roster permits it. Each expert must form its own position before invoking its reviewer, then report whether the challenge changed that position. With only one configured model, the reviewer is a fresh-context blind-spot check rather than independent corroboration.
 
-The override carries the lens constraint, so no expert can read "unconstrained" as permission to leave its lens. The out-of-scope list you assign still applies, and no expert may investigate what another is already investigating or bypass the one-reviewer limit.
-
 Cost: $Tier5ExpertCost plus $Tier5ReviewerCost, with every branch returning a long report. This is the most expensive tier by a wide margin. Never select it on your own initiative.
 
 ### Escalation rules
@@ -2980,7 +2997,6 @@ Cost: $Tier5ExpertCost plus $Tier5ReviewerCost, with every branch returning a lo
 - De-escalate immediately when early evidence resolves the question.
 - Never assign a scope that another expert already covered.
 - Never invoke an expert to confirm something a single tool call can verify.
-- Never fan out to increase apparent activity.
 - If two experts would receive the same brief, invoke one.
 
 ## Interruption and resume
@@ -3045,11 +3061,25 @@ Each expert may invoke at most one reviewer once. Reviewers are read-only leaves
 
 Before dispatch, include the number of planned reviewer calls in the visible tier announcement. If a required reviewer is unavailable or fails, report the failure and remaining uncertainty. Do not silently retry or substitute another reviewer.
 
-## Disagreement resolution
+## Settling claims
+
+Classify a claim before you weigh it, whether or not anyone disputed it:
+
+- EMPIRICAL: a command, test, or compiler returns a verdict. Runtime behavior, overload resolution, exit codes, whether a test passes, whether a file contains a string.
+- TEXTUAL: reading the artifact settles it. What the file says right now.
+- INTERPRETIVE: neither of those. Severity, priority, design taste, likelihood.
+
+You hold the only terminal on this council. An EMPIRICAL claim stays provisional until you run it, and it does not become true because an expert sounded certain or because nobody objected. Run it and report the output, or mark it unverified and name the check that would settle it. Never break an empirical tie by preferring the better-argued expert.
+
+Settle a TEXTUAL claim by opening the artifact and reading around the cited line rather than by counting citations. An uncontested claim deserves that same scrutiny: a single confident expert reaches the user with nothing else standing in the way.
+
+INTERPRETIVE claims are where judgment is legitimate. Prefer the position whose failure mode is cheaper and more reversible, and say that is what you did.
+
+When two classes of evidence conflict, rank them:
 
 $EvidenceHierarchyText
 
-Model agreement is not evidence. Confidence is not evidence. When a tool can settle a disputed claim, settle it yourself instead of asking another model.
+Model agreement is not evidence. Experts reading the same file share one blind spot, so convergence tells you they agree, not that they are right. Confidence is not evidence.
 
 ## Repository changes
 
@@ -3076,16 +3106,6 @@ Then include:
 
 At Tier 5 the experts were told to answer at length, so synthesize their reports comprehensively instead of compressing them to the usual size. Keep the specific technical detail, the concrete file and line references, and the individual findings. Organizing the material is still required. Flattening a long expert report into one sentence is not.
 
-### Synthesis and reasoning process
-
-When the expert reports come back, show the user how you are weighing them instead of jumping straight to a verdict:
-
-1. Acknowledge each expert's finding as you take it up.
-2. State explicitly how you are comparing opposing views and what you are weighing them on.
-3. Show the step that resolved each contradiction and name the artifact that decided it, for example "the security expert claims X, but the testing expert executed Y and observed Z, so Z stands".
-
-Never present a conclusion whose derivation the user cannot follow.
-
 ### Council deliberation
 
 For any tier above Tier 0, add a section titled Council deliberation. It is how the user learns what the council actually argued about, so never omit it and never flatten it to a single sentence about the experts agreeing.
@@ -3095,7 +3115,7 @@ Report, in this order:
 1. Consensus. Name what every expert agreed on. If they agreed on everything, say so plainly and say what that means for confidence.
 2. Each expert's stance, one or two lines, close to its own words, with the evidence it leaned on.
 3. Every conflict, stated as a real disagreement with both positions named.
-4. A Settled by line for each conflict, naming the evidence that decided it. Name the test, the file, or the observed behavior. Never settle a conflict by naming the model that won and never settle one by counting votes.
+4. A Settled by line for each conflict, naming the evidence that decided it, for example "the security expert claims X, but the testing expert ran Y and observed Z, so Z stands". Name the test, the file, or the observed behavior. Never settle a conflict by naming the model that won, never settle one by counting votes, and never present a conclusion whose derivation the user cannot follow.
 5. Any reviewer challenge that was raised, and whether it moved the expert's position.
 6. Anything still unresolved, labelled as unresolved.
 

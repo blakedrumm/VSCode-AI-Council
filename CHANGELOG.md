@@ -5,6 +5,41 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.7.7
+
+This release changes what the council is instructed to think, not what the installer does. Every
+change comes from watching the council review its own repository roughly nineteen times and writing
+down where it was wrong.
+
+### Changed
+
+- **An uncontested claim is now checked.** All the machinery for weighing evidence lived under a
+  heading about resolving disagreement, so it only ran when two experts collided. A single confident
+  expert reached the user with nothing in between, which is exactly how the worst error of the
+  review got through. Claims are now classified as empirical, textual, or interpretive, and an
+  empirical claim stays provisional until the coordinator runs it, whether or not anyone disputed
+  it. An empirical tie is never broken by preferring the better-argued expert.
+- **Experts now separate what they proved from what they believe.** The report opens with a line
+  naming what the agent could actually do, and splits its findings into verified and unverified,
+  each unverified claim carrying the exact check that would settle it. Every expert in the review
+  turned out to have no way to run a command, while being told to rank reproducible tests and
+  runtime behavior above documentation. They can no longer present reading as observation, and a
+  precise falsification plan now counts for more than another paragraph of argument.
+- **Experts stop at disconfirmation rather than at plausibility.** The old instruction was "stop
+  searching once you can act", which rewards the first answer that looks right.
+- **Experts must read what surrounds code they propose changing.** The most confidently wrong
+  recommendation of the entire review was refuted by a comment three lines above the line it cited.
+  That error needed no terminal to avoid, only twenty lines of reading instead of one.
+- **Reviewers look at the artifact instead of only the summary they were handed.** A reviewer was
+  given the expert's own account of its work, which is the version most favourable to its
+  conclusion, and had no instruction to go and check.
+- **Agreement is no longer treated as corroboration.** Experts reading the same file share one
+  blind spot, so convergence says they agree, not that they are right.
+- The coordinator prompt is shorter despite gaining all of this, because a duplicated synthesis
+  section and several rules that restated each other were removed. It is read on every turn,
+  including turns that use no experts at all, so its length is the most frequently paid cost in
+  the system.
+
 ## 5.7.6
 
 The security findings that 5.7.5 deliberately deferred, plus another Tier 5 review. The release

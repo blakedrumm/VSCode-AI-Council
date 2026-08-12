@@ -1191,6 +1191,41 @@ Describe 'End-to-end workspace install' {
         Test-Path -LiteralPath (Join-Path $AgentDirectory 'mm-expert-grok-4-5.agent.md') | Should -BeFalse
     }
 
+    # These are the rules that make the council reason rather than merely agree, so they are
+    # asserted on the generated output rather than trusted to survive prompt edits.
+    It 'tells every role how to tell proof from belief' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+        $Reviewer = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-reviewer-claude-opus-5.agent.md')
+
+        # An expert may have no terminal, so it must never present reading as running.
+        $Expert | Should -Match 'verification=executed \| static-only'
+        $Expert | Should -Match '(?m)^    VERIFIED:'
+        $Expert | Should -Match '(?m)^    UNVERIFIED:'
+
+        # The worst observed error was a proposal that a comment three lines away already refuted.
+        $Expert | Should -Match 'read what surrounds it'
+        $Expert | Should -Not -Match 'Stop searching once you can act'
+
+        # A reviewer handed only the expert's summary can only challenge that framing.
+        $Reviewer | Should -Match 'go look at the artifact yourself'
+
+        # An uncontested confident claim reaches the user with nothing in between.
+        $Coordinator | Should -Match 'EMPIRICAL: a command, test, or compiler'
+        $Coordinator | Should -Match 'uncontested claim deserves that same scrutiny'
+        $Coordinator | Should -Match 'not settled until you run the tool'
+        $Coordinator | Should -Match 'share one blind spot'
+    }
+
     It 'refuses a workspace path that is a file rather than a directory' {
         $FilePath = Join-Path $script:InstallTestRoot 'not-a-directory.txt'
         [System.IO.File]::WriteAllText($FilePath, 'x')
