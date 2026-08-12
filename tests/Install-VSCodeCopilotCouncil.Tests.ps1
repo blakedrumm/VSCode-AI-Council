@@ -1048,6 +1048,16 @@ Describe 'End-to-end workspace install' {
         $Coordinator = Read-Utf8File -Path (Join-Path $script:InstallTestRoot '.github\agents\multi-model-engineering-council.agent.md')
 
         $Coordinator | Should -Match '(?m)^### TL;DR\r?$'
+
+        # The TL;DR doubles as the marker that a turn finished, so an exception that let a short
+        # answer omit it made every completed short answer read later as work still owed.
+        $Coordinator | Should -Match 'Never skip it'
+        $Coordinator | Should -Match 'reads later as work still owed and gets done twice'
+        $Coordinator | Should -Not -Match 'Skip it only when'
+
+        # Making it unconditional is only tolerable because a short answer may shrink it to one
+        # bullet. Without that clause every one-line Tier 0 reply carries a five-bullet summary.
+        $Coordinator | Should -Match 'On a short answer write one bullet'
     }
 
     It 'gives every role the same evidence ranking' {
@@ -1491,6 +1501,64 @@ Describe 'End-to-end workspace install' {
         $Coordinator | Should -Match 'narrowest brief that still covers its lens'
     }
 
+    It 'gives a reviewer a way to say it could not check' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Reviewer = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-reviewer-claude-opus-5.agent.md')
+
+        # Without a failure stance a reviewer that never located the claim still had to pick agree
+        # or disagree, and the expert reports that stance as proof the position was tested. Pin the
+        # enum, not the phrase: the prose mentions it too, so a prose-only match proves nothing.
+        $Reviewer | Should -Match 'STANCE: Strong agree \| Agree \| Disagree \| Strong disagree \| Cannot assess'
+        $Reviewer | Should -Match 'an agreement you did not earn'
+
+        # The prompt used to claim read and search while the tool list also grants web.
+        $Reviewer | Should -Match 'You have no command-execution tool'
+        $Reviewer | Should -Not -Match 'You have read and search tools'
+        $Reviewer | Should -Match '(?m)^    CAPABILITY:'
+
+        # A silent reviewer left the position untested while the report still looked complete.
+        $Reviewer | Should -Match 'reported upward as a failed review'
+
+        # The Tier 5 override is written for the expert and reaches the reviewer through the brief.
+        $Reviewer | Should -Match 'was written for the expert, not for you'
+    }
+
+    It 'bounds what an expensive tier is allowed to spend' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # The Tier 5 override lifted the length limit with nothing on the other side of the scale.
+        $Coordinator | Should -Match 'leave out investigation narrative, tool logs, and restatements'
+        $Coordinator | Should -Match 'one evidence pointer and one concrete action or check'
+
+        # It has no more of a token meter than it has a clock, and inventing one is the same error.
+        $Coordinator | Should -Match 'You have no token meter either'
+        $Coordinator | Should -Match 'already paid for and you cannot unread it'
+
+        # It knows the exact invocation count before it spends it, so the user should too.
+        $Coordinator | Should -Match 'Cost: N expert calls, M reviewer calls'
+
+        # Experts never see each other, so Tier 3 is adjudicated, not a debate between them.
+        $Coordinator | Should -Match 'two independent analyses that you adjudicate'
+        $Coordinator | Should -Match 'only adversarial element inside a branch'
+    }
+
     It 'keeps the single-model debate fallback honest' {
         & $script:InstallerPath `
             -Scope Workspace `
@@ -1506,6 +1574,9 @@ Describe 'End-to-end workspace install' {
         # With one model the debate is two framings of the same model, adjudicated by the
         # coordinator. Collapsing it to a single run would remove the only opposition left.
         $Coordinator | Should -Match '(?s)true cross-model debate is not possible.*?opposing framings.*?once to defend the proposal and once to break it.*?adjudicate the positions yourself'
+
+        # Two framings of one model is self-critique, and calling it disagreement overstates it.
+        $Coordinator | Should -Match 'not independent model disagreement'
 
         # The tier is unavailable, but the redirect to where the work should go is behavior.
         $Coordinator | Should -Match 'Stay at Tier 1, and go to Tier 3 only when'

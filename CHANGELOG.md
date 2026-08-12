@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.10.0
+
+A Tier 5 review aimed at the two roles that had never been reviewed on their own terms: the reviewer
+prompt, which is the smallest file and the only adversarial element inside a branch, and the cost of
+the tier that spends the most.
+
+### Fixed
+
+- The reviewer prompt told the reviewer it had read and search tools. Its tool list also grants web.
+  The prompt was describing the role inaccurately to the model performing it, so it now states what
+  it can do from the same list the installer writes, and says plainly that it cannot run anything.
+- A reviewer had no way to report that it could not check the claim. `STANCE` offered only agree and
+  disagree, so a reviewer that never located the target still had to pick one, and the expert then
+  reported that stance as evidence its position had been tested. `Cannot assess` is now a stance.
+- A reviewer that returned nothing usable was invisible. The prompt now tells it that silence is
+  reported upward as a failed review rather than absorbed as agreement.
+- The TL;DR could be skipped on a short answer, but since 5.9.0 the TL;DR is also the marker that
+  tells the next turn this one finished. A completed short answer therefore left no marker and read
+  later as work still owed, which is the most common answer length on the cheapest tier. It is now
+  unconditional and shrinks to one bullet instead.
+
+### Changed
+
+- The Tier 5 override lifted the length limit with nothing on the other side of the scale. It now
+  asks for ranked findings with one evidence pointer and one action each, and excludes investigation
+  narrative and tool logs, so depth is spent on findings rather than on retelling the search.
+- The coordinator knows it has no clock. It now also knows it has no token meter, so it cannot
+  invent a remaining budget or a compaction step, and a report that returned is already paid for.
+- The pre-dispatch announcement now discloses the invocation count. The coordinator knows the exact
+  number before it spends it, so the user sees it before it is spent rather than after.
+- Tier 3 now says what it actually buys. Experts cannot see each other, so it is two independent
+  analyses that the coordinator adjudicates, which is also why the reviewer is required there and
+  skipped at Tier 2. The single-model fallback now calls itself a structured self-critique and says
+  it is not independent model disagreement.
+- A reviewer's line budget was flat at five whether it agreed or overturned the finding. Agreement
+  now costs three lines and disagreement is allowed eight, so the expensive case is the useful one.
+
 ## 5.9.0
 
 Two Tier 5 reviews, ten expert reports, on two failures the user hit personally: a steered run that
