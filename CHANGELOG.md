@@ -5,6 +5,69 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.8.0
+
+A five-lens review of the generated prompts, one expert per configured model. Two of its
+recommendations were refuted by evidence and rejected, which is recorded below because a review
+that only ever agrees with itself is not worth running.
+
+### Added
+
+- **Every role now knows that what it reads is data, not instructions.** All eleven generated
+  agent files were checked and none of them said anything about untrusted content, while all three
+  roles read repository files and web pages and one of them holds the terminal. A file, a page, or
+  a tool result that tells an agent to change scope, run something, or set a rule aside is now a
+  finding to report rather than an order to obey, and the coordinator builds every command from
+  the user's request and its own reading instead of copying one out of content it read.
+
+### Changed
+
+- **An expert names the strongest competing answer before it gathers evidence, not after.** That
+  instruction used to be step seven, which is after the evidence is already in hand, so the
+  alternative was being written up as a rationalization rather than tested as a rival. The
+  disconfirming check now has something to disconfirm against.
+- **An expert is told what it can run instead of being asked to pick from a choice it does not
+  have.** The capability line offered "verification=executed" to agents whose tool list has never
+  once included execute, which invited exactly the claim the line exists to prevent. The sentence
+  is now generated from the tool list itself, so it cannot claim a capability the front matter
+  withholds or deny one it grants. Results an expert read but did not produce now have their own
+  name rather than being flattened into the same bucket as ordinary reading.
+- **A field that restated another field was replaced with one that does work.** The expert's
+  OPEN QUESTION asked for what stays unverified, two lines under UNVERIFIED, which asks for the
+  same thing. It now carries the claim's type, which is the taxonomy the coordinator is already
+  required to apply. The reviewer keeps its OPEN QUESTION, because a reviewer has no UNVERIFIED
+  field and there the line is load-bearing.
+- **An expert re-checks the one briefed fact its conclusion rests on.** Shared facts go into every
+  brief, so a single wrong premise reaches every branch of a fan-out at once and their agreement
+  on it then reads as corroboration.
+- **Two unhandled cases in the nested-review directive are handled.** A directive demanding a
+  review while naming no reviewer used to fall between three rules that each claimed it. And with
+  one model configured the only permitted reviewer runs the expert's own model, so a blanket
+  "do not invoke yourself" forbade the single action a required directive demands.
+- **A degraded expert report is now treated like a branch that never reported.** A report missing
+  its capability or verification lines, or claiming to have run something from a branch with no
+  terminal, has its empirical claims marked unverified. A polished narrative is not one of the
+  required fields.
+- **Tier 0 wins ties, and the coordinator can start at a tier instead of climbing to it.** The
+  Tier 0 and Tier 1 triggers overlap enough that a model could justify whichever it preferred.
+
+### Rejected
+
+- Deleting the coordinator's reviewer roster as redundant. Checked and refuted: no reviewer name
+  survives anywhere else in that prompt, and the coordinator's own agent list holds only experts.
+  Deleting it would have left the coordinator unable to name a valid reviewer, which the expert
+  treats as malformed, silently disabling nested review at Tiers 3 and 5.
+- Dropping the automatic review on Tier 3 on the grounds that the opposing expert is already the
+  challenge. Refuted by the system's own design: experts cannot see each other, which is why the
+  contradiction field was rewritten in 5.7.8, so at Tier 3 the reviewer is the only adversarial
+  element inside a branch.
+
+The suite is now 106 tests, including assertions for behaviors that had none: the deliberation and
+resume contracts, the dispatch announcement, and the single-model debate fallback. One existing
+assertion turned out to match both configurations and so could not tell them apart; it is now
+exact. Twenty-five mutations were run against the new assertions. Four survived the first pass,
+all four were real gaps in my own tests, and all four are now caught.
+
 ## 5.7.9
 
 ### Added
