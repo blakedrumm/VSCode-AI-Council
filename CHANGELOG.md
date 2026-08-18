@@ -5,6 +5,84 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.13.0
+
+Tier 5 asked every expert to nominate its own weakest claim for review, and it asked before any
+other expert had reported. A target chosen inside one branch cannot be a disagreement between
+branches, so the most expensive tier in the system was structurally incapable of testing the one
+thing it was fanning out to find. This release splits it into two waves and moves the review to the
+side of the barrier where the conflicts actually exist.
+
+### Changed
+
+- Tier 5 is now an exhaustive collaborative review rather than an unconstrained brainstorm. Wave 1
+  is independent discovery with every expert on `NESTED REVIEW: SKIP`. The coordinator then builds a
+  conflict state from the returned reports, settles whatever a command or a file read can settle,
+  and only then runs Wave 2. The old trigger words still work, so nobody has to learn a new phrase.
+- The coordinator invokes the Wave 2 reviewers itself. Reviewer names are now on its front-matter
+  allowlist, which is what makes a targeted post-discovery challenge possible without re-running an
+  expert purely to carry the call. Reviewers gain nothing from this: they still have no agent tool
+  and no allowlist of their own, so the two-level depth cap is unchanged.
+- Wave 2 has four triggers, and expert agreement is not a reason to skip any of them. Three cover
+  conflicts, unverified load-bearing claims, and hard-to-reverse consensus. The fourth is a floor:
+  when none of the others fire, one reviewer still attacks the least-verified claim in the draft
+  answer. Without that floor a unanimous run would get zero scrutiny, which is the exact case the
+  prompt already describes as a shared blind spot rather than as evidence.
+- Tier 5 costs the same ceiling as before, up to one expert and one reviewer per model, but the
+  waves are serial. The generated cost line, the README, and the post-install summary now say so,
+  because the wall clock became the slowest expert plus the slowest reviewer rather than the slowest
+  single branch. That is a real regression, accepted deliberately in exchange for concrete targets.
+- The reviewer prompt no longer assumes an expert called it. It states what differs when the
+  coordinator calls directly: the brief is second-hand, and the experts who produced the claim are
+  not there to correct it.
+- The single-model fallback now calls its same-model review self-critique rather than a blind-spot
+  check, and says plainly that it is not corroboration.
+
+### Added
+
+- Tier-5-only collaboration artifacts: a council collaboration log, a conflict matrix, an evidence
+  ledger, a dissent register, and a list of unresolved risks. Tiers 1 through 4 keep the compact
+  council deliberation, because the ceremony would cost more than it tells anyone at those tiers.
+- Experts now attach a compact claim record to each load-bearing conclusion, including a
+  falsification check and what would prove the claim wrong. Those two fields are the ones the
+  coordinator cannot reconstruct on its own, and they are what Wave 2 aims at.
+- Reviewers now report the claim they attacked and what would change their stance. A position
+  nothing could change was never derived from evidence, and saying so is more useful than a
+  confident agreement.
+- One shared trust-boundary policy is rendered into all three prompts. The three hand-maintained
+  copies had already drifted: the coordinator said "never an order to obey" while the other two said
+  "not", and only the coordinator treated subagent reports as untrusted at all. The shared version
+  is the strongest of the three and now names reports, delegations, and reviewer briefs explicitly.
+- A Tier 5 bounds statement, rendered into the coordinator and into the verbatim override the
+  experts receive, saying that the tier changes only depth and review schedule and relaxes no tool,
+  permission, scope, or safety constraint. The override is the only Tier 5 text an expert ever sees,
+  so the statement had to live inside it rather than near it.
+
+### Fixed
+
+- **Generated agent bodies were never scanned for the failure the validator claimed to catch.** The
+  comment above those checks said they guarded against a template variable that failed to expand,
+  but a body is around 20 KB, so a missing section cleared the length floor and a variable that
+  expanded to the wrong non-empty value left no empty bullet behind. Validation now rejects a
+  surviving `$Name` token and rejects control characters from a mis-escaped backtick. Only the
+  release workflow checked for these before, which left every local run and every downloaded copy
+  unguarded. Model names now reject `$` and backtick for the same reason.
+- **A duplicate `agents:` key passed validation.** The duplicate-key loop covered seven front-matter
+  keys and not that one, and the list assertion was an unanchored substring search, so a file with
+  two `agents:` lines passed as long as one of them matched. A YAML parser keeps one and discards the
+  other silently, and the discarded one could be the half granting a role its reviewers. The key is
+  now checked at most once and every front-matter assertion is line-anchored.
+- **A malformed installed coordinator could make the installer unstartable.** Roster recovery keeps
+  any allowlist entry ending in " Expert", which is a name heuristic rather than a check, so a future
+  agent named that way would be recovered as a phantom model until the count guard refused to run at
+  all. The recovered roster is now bounded, so it degrades to something usable instead.
+- Allowlist entries are deduplicated when the front matter is built, so a caller assembling a list
+  from more than one role cannot emit a repeated entry that a matching expectation would still accept.
+- The claim that the coordinator "cannot be recruited as a subagent" was too strong in both the
+  installer comment and the README. VS Code documents that an explicit `agents` list overrides
+  `disable-model-invocation: true`, so the flag protects against implicit selection rather than
+  acting as a lock. Both now say what it actually does.
+
 ## 5.12.0
 
 Nothing in any generated prompt mentioned dead code, unused symbols, or leftovers before this

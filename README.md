@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.12.0-blue" alt="Version 5.12.0">
+  <img src="https://img.shields.io/badge/version-5.13.0-blue" alt="Version 5.13.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -55,11 +55,11 @@ The installer prompts for the models to use, writes the agent files, and tells y
 
 Reviewers cannot invoke subagents, which caps nesting at two levels. A recursion like GPT to Claude to GPT to Claude is structurally impossible rather than merely discouraged.
 
-Workers use `user-invocable: false` and `disable-model-invocation: false`: they stay out of the agent picker while remaining available through the coordinator's explicit allowlist. The coordinator cannot itself be recruited as a subagent.
+Workers use `user-invocable: false` and `disable-model-invocation: false`: they stay out of the agent picker while remaining available through the coordinator's explicit allowlist. The coordinator sets `disable-model-invocation: true`, which keeps it out of general subagent selection. VS Code documents that naming an agent in an explicit `agents` list overrides that flag, so this is protection from implicit recruitment rather than an absolute lock.
 
-Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 and Tier 5 require that review; Tier 4 authorizes it only for a branch with a material unresolved claim. With more than one model configured, an expert running Claude can only be challenged by a reviewer running something other than Claude.
+Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 requires that review and Tier 4 authorizes it only for a branch with a material unresolved claim. Tier 5 works differently: its experts get no nested review at all, and the coordinator invokes the reviewers itself afterwards. With more than one model configured, an expert running Claude can only be challenged by a reviewer running something other than Claude.
 
-If you configure only one model, the council adapts rather than pretending otherwise. Tiers 2 and 4 need a second model, so they are marked unavailable. The reviewer still runs, but it is a fresh-context blind-spot check rather than independent corroboration, and the generated prompts say so.
+If you configure only one model, the council adapts rather than pretending otherwise. Tiers 2 and 4 need a second model, so they are marked unavailable. The reviewer still runs, but it is a fresh-context self-critique rather than independent corroboration, and the generated prompts say so.
 
 ## The six tiers
 
@@ -72,11 +72,11 @@ The coordinator classifies each request once and picks the cheapest strategy tha
 | 2 | Two experts in parallel | 2 calls | The task spans two lenses, or touches shared code and public behavior |
 | 3 | Adversarial debate | ~4 calls | You asked for a debate, or a disagreement survived that no tool could settle |
 | 4 | Full parallel team | up to 5 expert calls, plus selected reviews | You asked for the full team, or the work spans genuinely independent subsystems |
-| 5 | Unconstrained brainstorm | up to 10 long calls | You explicitly said brainstorm, deep review, or unconstrained. Every expert answers exhaustively, then one leaf reviewer attacks its strongest material assumption |
+| 5 | Exhaustive collaborative review | up to 10 calls in two serial waves | You explicitly asked for an exhaustive review, a brainstorm, a deep review, or an unconstrained one. Wave 1 is independent discovery, one expert per lens, with no nested review. The coordinator then builds a conflict state and aims reviewers at what the experts disagreed on or could not verify |
 
 Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, from spending an expert call on something a single tool call can verify, and from selecting Tier 5 on its own initiative.
 
-Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won.
+Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won. Tier 5 adds five auditable artifacts on top of it: a collaboration log, a conflict matrix, an evidence ledger, a dissent register, and a list of unresolved risks. Those are Tier 5 only, so the cheaper tiers stay compact.
 
 <p align="center">
   <img src="docs/parallel-experts.png" alt="Five expert agents running at once, each on a different model with a different review lens" width="380">
@@ -194,7 +194,7 @@ The installer does **not** enable global tool auto-approval, and does **not** en
 
 Before activating a roster, the installer validates the exact content it is about to write. Live agent files are changed only after that check passes, and a file whose bytes already match is left alone, so re-running costs nothing and produces no backup churn. A named mutex prevents concurrent installers from interleaving changes, and a failed activation restores the previous agent files and the original nested-subagent setting.
 
-The repository's Pester suite runs the same behavioral checks on PowerShell 7 and Windows PowerShell 5.1, including non-ASCII model names, settings mutation, generated front matter, and Tier 5 review policy.
+The repository's Pester suite runs the same behavioral checks on PowerShell 7 and Windows PowerShell 5.1, including non-ASCII model names, settings mutation, generated front matter, deterministic generation, and the Tier 5 two-wave review policy.
 
 ## Uninstall
 
@@ -208,7 +208,7 @@ Then set `chat.subagents.allowInvocationsFromSubagents` back to `false` if you w
 
 ## Cost
 
-Tier 4 runs up to five frontier models in parallel, and a selected nested review can double a branch. Tier 5 intentionally runs one reviewer behind every expert, so a five-model Tier 5 run can use ten model calls and return a large synthesis. That is precisely why the tier gating exists, and why the coordinator is instructed to start at the lowest tier that can answer correctly. In practice most requests cost zero or one expert call.
+Tier 4 runs up to five frontier models in parallel, and a selected nested review can double a branch. Tier 5 runs the full roster in a first wave and then up to one reviewer per model in a second, so a five-model Tier 5 run can use ten calls and return a large synthesis. The ceiling is the same as it was before the second wave existed, but the waves are serial, so a Tier 5 run takes the slowest expert plus the slowest reviewer rather than the slowest single branch. That is precisely why the tier gating exists, and why the coordinator is instructed to start at the lowest tier that can answer correctly. In practice most requests cost zero or one expert call.
 
 Hover a subagent section in the chat response to see the AI credits it used.
 
