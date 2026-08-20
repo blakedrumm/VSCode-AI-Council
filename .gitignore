@@ -14,3 +14,4 @@ Install-VSCodeCopilotCouncil-v5.txt
 # Scratch workspaces from running the installer by hand. The Pester suite writes to the system
 # temp directory instead, so nothing here is ever a test artifact.
 /temp-*/
+testResults.xml

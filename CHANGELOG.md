@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.13.1
+
+The startup banner spelled the project name wrong. It is the first thing the installer prints, so a
+misspelling there is the first impression every user gets.
+
+### Fixed
+
+- The ASCII banner rendered `COUNSIL` instead of `COUNCIL`. Two rows of the fifth glyph carried the
+  `S` crossbar; they now match the leading `C` byte for byte, and the surrounding column alignment is
+  unchanged.
+
+### Changed
+
+- `testResults.xml` is gitignored. The Pester suite writes it into the repository root on a local
+  run, and it was showing up as an untracked file every time.
+
 ## 5.13.0
 
 Tier 5 asked every expert to nominate its own weakest claim for review, and it asked before any

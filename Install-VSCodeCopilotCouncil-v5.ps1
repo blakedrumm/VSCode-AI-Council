@@ -177,10 +177,10 @@
         August 6th, 2026
 
     Last Modified:
-        August 18th, 2026
+        August 20th, 2026
 
     Version:
-        5.13.0
+        5.13.1
 
     Compatible with:
         Windows PowerShell 5.1
@@ -351,7 +351,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.13.0'
+$ScriptVersion = '5.13.1'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -511,8 +511,8 @@ function Write-InstallBanner
  ######   #######  ##     ## ##    ##  ######  #### ##
 ##    ## ##     ## ##     ## ###   ## ##    ##  ##  ##
 ##       ##     ## ##     ## ####  ## ##        ##  ##
-##       ##     ## ##     ## ## ## ##  ######   ##  ##
-##       ##     ## ##     ## ##  ####       ##  ##  ##
+##       ##     ## ##     ## ## ## ## ##        ##  ##
+##       ##     ## ##     ## ##  #### ##        ##  ##
 ##    ## ##     ## ##     ## ##   ### ##    ##  ##  ##
  ######   #######   #######  ##    ##  ######  #### ########
   ##     ##     ##     ##     ##     ##     ##     ##     ##
