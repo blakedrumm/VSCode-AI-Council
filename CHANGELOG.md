@@ -5,6 +5,42 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.14.0
+
+A reviewer that knows whose work it is holding is not an independent reviewer, and until now nothing
+stopped a brief from naming the source. Separately, the council only ever showed users the
+coordinator's summary, so there was no way to check what an expert actually said against what the
+synthesis claimed it said.
+
+### Added
+
+- Reviewer briefs are anonymized. Whoever writes one, an expert for its own nested review or the
+  coordinator for a Tier 5 Wave 2 target, may not name the model, the vendor, or the agent behind
+  the position under attack, and labels positions `Position A` and `Position B` instead. The lens is
+  covered by the same ban, because position in the model list is what assigns the lens, so naming it
+  would name the model exactly. The identity map stays with the coordinator, which still needs it to
+  pick a different-model reviewer and to attribute stances in the user-facing deliberation. The
+  reviewer prompt says the missing attribution is deliberate, so an anonymous brief is not mistaken
+  for a malformed one. This is bias reduction, not a confidentiality boundary, and the prompt says
+  so rather than overclaiming.
+- Asking to see the raw reports prints what each expert returned, per expert, alongside the
+  synthesis instead of replacing it. Reports are reproduced inside fenced blocks so nothing in them
+  renders as a link or an image, and the fence must be longer than any run of backticks in the
+  report, because an expert quoting code carries fences of its own and a shorter wrapper would end
+  at the first one. They are labelled as untrusted subagent output, and printing one never promotes
+  it to an instruction on this turn or a later one. The section is opt-in, is unavailable at
+  Tier 0, and a request arriving after the answer reuses the reports already in the transcript
+  rather than dispatching the roster twice.
+
+### Changed
+
+- The two standing bans on pasting a subagent transcript now sit alongside a definition of what a
+  report is: the final answer a subagent returned, never its hidden reasoning, scratchpad,
+  intermediate messages, or tool-call trace. Without that line the wider ban would have swallowed
+  the new section.
+- The prior art behind the anonymized briefs, Andrej Karpathy's `llm-council`, is credited in the
+  README.
+
 ## 5.13.1
 
 The startup banner spelled the project name wrong. It is the first thing the installer prints, so a

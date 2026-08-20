@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.13.1-blue" alt="Version 5.13.1">
+  <img src="https://img.shields.io/badge/version-5.14.0-blue" alt="Version 5.14.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -59,6 +59,8 @@ Workers use `user-invocable: false` and `disable-model-invocation: false`: they 
 
 Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 requires that review and Tier 4 authorizes it only for a branch with a material unresolved claim. Tier 5 works differently: its experts get no nested review at all, and the coordinator invokes the reviewers itself afterwards. With more than one model configured, an expert running Claude can only be challenged by a reviewer running something other than Claude.
 
+Reviewer briefs are anonymized. Whoever writes one, an expert for its own nested review or the coordinator for a Tier 5 second wave, may not name the model, the vendor, or the lens behind the position under attack, and labels the positions `Position A` and `Position B` instead. The lens is included because position in the model list is what assigns it, so naming the lens would name the model. The identity map stays with the coordinator, which still needs it to pick a different-model reviewer and to attribute stances to named experts in the final answer. This is bias reduction rather than a confidentiality boundary, and a reviewer that recognizes a writing style has broken nothing.
+
 If you configure only one model, the council adapts rather than pretending otherwise. Tiers 2 and 4 need a second model, so they are marked unavailable. The reviewer still runs, but it is a fresh-context self-critique rather than independent corroboration, and the generated prompts say so.
 
 ## The six tiers
@@ -77,6 +79,8 @@ The coordinator classifies each request once and picks the cheapest strategy tha
 Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, from spending an expert call on something a single tool call can verify, and from selecting Tier 5 on its own initiative.
 
 Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won. Tier 5 adds five auditable artifacts on top of it: a collaboration log, a conflict matrix, an evidence ledger, a dissent register, and a list of unresolved risks. Those are Tier 5 only, so the cheaper tiers stay compact.
+
+That section is the coordinator's summary. When you want what an expert actually returned, ask to **see the raw reports** and it appends each one under its own heading, alongside the synthesis rather than in place of it. The reports are fenced so nothing inside them renders as a link or an image, and labelled as untrusted subagent output, because printing a report never promotes it into an instruction.
 
 <p align="center">
   <img src="docs/parallel-experts.png" alt="Five expert agents running at once, each on a different model with a different review lens" width="380">
@@ -213,6 +217,10 @@ Tier 4 runs up to five frontier models in parallel, and a selected nested review
 Hover a subagent section in the chat response to see the AI credits it used.
 
 The other half of the cost is context, and it is easy to miss because nothing bills you for it directly. Everything attached to the request is re-sent on every turn, so a large file left selected in the editor, or pinned as context, is paid for again each time you send a message and again inside every expert the coordinator dispatches. If a long session starts feeling slow or expensive, deselect large files and start a fresh conversation for a new task.
+
+## Prior art
+
+Andrej Karpathy's [llm-council](https://github.com/karpathy/llm-council) runs the same core idea somewhere else: a local web app that fans a question out to several models over OpenRouter, has them rank each other anonymously, and lets a chairman model write the final answer. It is a reading companion with no tools and a fixed three-stage pipeline on every query. This project is a VS Code agent system that reads, edits, and tests a repository, decides per question how many models the answer is worth, and gives each one a distinct review lens. The anonymized reviewer briefs described above are borrowed from it.
 
 ## License
 
