@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.14.0-blue" alt="Version 5.14.0">
+  <img src="https://img.shields.io/badge/version-5.16.0-blue" alt="Version 5.16.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -80,6 +80,8 @@ Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explic
 
 Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won. Tier 5 adds five auditable artifacts on top of it: a collaboration log, a conflict matrix, an evidence ledger, a dissent register, and a list of unresolved risks. Those are Tier 5 only, so the cheaper tiers stay compact.
 
+Agreement is weighed by where it came from. Shared facts go into every brief because that stops five branches rediscovering the same thing, but a fact the coordinator supplied comes back from every branch as one piece of evidence rather than five, and it is counted that way. A finding is not treated as weaker for having been reached by only one expert, and Tier 5 aims its first reviewer at exactly that case: a lone finding that would overturn the answer if it holds. When the coordinator verifies something that kills a premise a report was resting on, the conclusions built on that premise leave the consensus, the rest of the report stays, and one dead premise re-runs a single lens instead of the whole roster.
+
 That section is the coordinator's summary. When you want what an expert actually returned, ask to **see the raw reports** and it appends each one under its own heading, alongside the synthesis rather than in place of it. The reports are fenced so nothing inside them renders as a link or an image, and labelled as untrusted subagent output, because printing a report never promotes it into an instruction.
 
 <p align="center">
@@ -90,17 +92,85 @@ That section is the coordinator's summary. When you want what an expert actually
 
 ### The five lenses
 
-Position in the model list determines the lens, so parallel experts never duplicate each other.
+Position in the model list determines the lens, so parallel experts never duplicate each other. Each lens also carries a stable role identifier. Titles are prose and get reworded; identifiers do not, so a pinned model preference survives an edit to the wording.
 
-1. Implementation and correctness
-2. Architecture and maintainability
-3. Security and reliability
-4. Testing and regression risk
-5. Performance and operations
+| Role identifier | Lens | Position |
+|---|---|---|
+| `code-investigator` | Implementation and correctness | 1 |
+| `architecture-reviewer` | Architecture and maintainability | 2 |
+| `security-reviewer` | Security and reliability | 3 |
+| `test-engineer` | Testing and regression risk | 4 |
+| `performance-operations` | Performance and operations | 5 |
+
+The coordinator is `coordinator`. The leaf reviewers are the `challenger` class, one per configured model. There is deliberately no separate "fast reviewer" seat: the recommendation engine scores reduced-size models at zero because such a model serves poorly as an expert and worse as that expert's peer reviewer. Pin a cheaper model to an existing role if that is what you want.
+
+## Models, roles, and availability
+
+Model preferences live in one place, in the script you already downloaded, so there is no second file to fetch or keep in sync. Open the installer and look for `$RoleModelRegistry` near the top. For each role you can set a preferred model, an ordered list of fallbacks, capability notes, a cost or performance class, and a plain-language reason.
+
+It ships empty. An empty registry means nothing changes: models still come from `-Models`, the picker, a previous installation, or the built-in defaults.
+
+### Fallbacks are resolved by VS Code, not by the installer
+
+VS Code accepts a prioritized list in an agent's `model:` field and tries each entry in order until one is available. So a fallback chain is written into the agent file and honoured at run time, which is why the installer never removes an entry for being unavailable. Removing one would duplicate what the platform already does and would make the generated files depend on which machine produced them.
+
+A single model stays a plain value, so an unchanged installation rewrites nothing.
+
+An expert's fallback chain never includes a model another seat already runs. An expert that fell back onto a peer's model could be challenged by that peer's reviewer, which is exactly the echo the council exists to avoid. Reviewers get no fallback for the same reason.
+
+### What the installer can and cannot see
+
+These are four different questions and the installer can only observe part of the first:
+
+| Question | Can the installer answer it? |
+|---|---|
+| Does Copilot offer this model? | Only indirectly, from a local cache |
+| Does your subscription include it? | No |
+| Did an administrator enable it? | No |
+| Does your organization permit it for this data classification? | No |
+
+When a configured model is missing from the cache, the installer says it is missing from that cache and stops there. It will not tell you the model was deprecated, or blocked, or outside your plan, because it cannot know which. Availability is only asserted when the cache was actually read; if the read fails, the built-in list is a guess and is never used to call a real model missing.
+
+### Optional local policy
+
+Pass `-PolicyPath` to load a JSON file:
+
+```json
+{
+  "allowedModels": [],
+  "blockedModels": [],
+  "restrictedDataClassifications": [],
+  "notes": "",
+  "sourceUrl": "https://example.invalid/policy",
+  "dateLastReviewed": "2026-01-01"
+}
+```
+
+Without the switch, no policy file is opened at all, which is what keeps a stock installation organization-neutral. A blocked model always loses. A declared but empty `allowedModels` permits nothing, because a present-but-empty list is a real policy rather than the absence of one. `sourceUrl` must be a plain https URL; it is recorded and displayed and is never fetched.
+
+This constrains what the installer writes and nothing else. It is user-supplied and unverified, it does not control which model VS Code ultimately runs, and it is not a compliance determination. Confirm requirements with your organization.
+
+### Renames and deprecation
+
+`$ModelAliasMap` maps a retired identifier to its replacement. `$ModelLifecycle` records provider, status, announced and removal dates, replacement, source, and date verified. Both ship empty and are meant to stay that way unless you have read the source yourself: a wrong removal date shipped to a global audience is worse than no date. Anything unverified reads `unknown`, and a recorded source is displayed rather than retrieved.
+
+### Checking for drift
+
+```powershell
+.\.github\scripts\Scan-ModelReferences.ps1
+```
+
+A maintainer tool, report-only, and not a switch on the installer. It reports model identifiers referenced outside the registry, matching only names the registry already knows so ordinary English does not flood the output. Add `-FailOnFinding` for CI, `-IncludeChangelog` to include history, and `-ApplyAliases` to rewrite recorded renames after taking a backup.
+
+### Known limitations
+
+- Discovery reads a local VS Code cache. It is not a Copilot API, it reflects one profile on one machine, and it can be stale.
+- Which model actually answers is decided by VS Code at run time. The installer writes the preference; it cannot observe the outcome.
+- Nothing here detects a deprecation on its own. Lifecycle data is whatever a human recorded.
 
 ## Model selection
 
-The installer reads the live model list out of the VS Code model cache, so the picker only offers models your GitHub Copilot account can actually use.
+The installer reads the model list out of the VS Code model cache, so the picker offers the agent-capable models that cache lists for your profile. That is a local cache rather than an entitlement check, so it can be stale and it cannot confirm what your account, plan, or administrator allows.
 
 It also marks a recommended set:
 
@@ -144,6 +214,8 @@ If you would rather a run finish before your next message is processed, choose *
 The coordinator is the only agent with edit and terminal access. Experts and reviewers can read, search, and browse, so a finding always has to pass through the coordinator before anything on disk changes.
 
 When it does change code, it matches the conventions already in the file rather than its own defaults, and it treats a rule stated in a linter config, an editorconfig, or a contributing guide as outranking its preference.
+
+Ordinary recoverable work runs without asking: edits, builds, tests, package restore, static analysis, local branches, local diagnostics. It stops and names the specific action first when the effects would leave the working copy and become visible to other people or systems, or would destroy state nobody can rebuild from what is on disk. A goal you set earlier does not authorize an irreversible step it chooses later.
 
 It never deletes code it believes is unused as part of another change. Removal is treated as its own separate step and it asks you first, because a symbol can be reached by reflection, dependency injection, an exported API, a build script, or a feature flag without any text search finding it. Unexporting, privatizing, dropping a registration, or letting a formatter strip something all count as removal for this purpose. When it does ask, it names the symbol, says where it searched, says which of those vectors it could not rule out, and lets you approve candidates one at a time.
 

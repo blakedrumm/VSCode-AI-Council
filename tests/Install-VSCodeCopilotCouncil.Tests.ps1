@@ -32,6 +32,14 @@ BeforeAll {
         'Test-PreviewModelName',
         'ConvertTo-AgentSlug',
         'Get-PropertyValue',
+        'ConvertFrom-FrontMatterModelValue',
+        'Get-RoleFallbackCandidate',
+        'Resolve-ModelAlias',
+        'Get-ModelLifecycleRecord',
+        'Test-CitationUrl',
+        'Resolve-RoleModelChain',
+        'Import-CouncilPolicy',
+        'Test-ModelPolicyDecision',
         'Initialize-SqliteInterop',
         'ConvertFrom-ModelCacheJson',
         'Get-CachedModelRecord',
@@ -81,7 +89,7 @@ BeforeAll {
 
     # The generators read these script-level constants, so the harness has to load the real values
     # rather than restate them, or the tests would stop tracking the installer.
-    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'UntrustedContentPolicy', 'Tier5BoundsPolicy', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount'))
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'UntrustedContentPolicy', 'Tier5BoundsPolicy', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount', 'RoleModelRegistry', 'ModelAliasMap', 'ModelLifecycle', 'CoordinatorRoleId', 'ChallengerRoleId'))
     {
         $ConstantAst = $script:InstallerAst.Find(
             {
@@ -1194,9 +1202,21 @@ Describe 'End-to-end workspace install' {
         # pass even after one config was given the other's review policy.
         $Expert | Should -Match ([regex]::Escape($RequiredLine))
 
-        # Only the verbatim override reaches the expert, so the lens constraint has to live inside it
-        # rather than in the coordinator-only prose that follows.
-        $Coordinator | Should -Match 'not permission to leave that lens'
+        # Only the verbatim override reaches the expert, so the bounds policy has to sit INSIDE that
+        # block rather than in the coordinator-only prose around it. Asserting the phrase existed
+        # somewhere in the file could never catch that: the block carried a hand-written paraphrase
+        # that silently dropped the safety, trust-boundary, file-ownership and destructive-action
+        # clauses, while the real constant sat outside it where no expert would ever be handed it.
+        $Coordinator | Should -Match '(?s)Append this override verbatim to EVERY Wave 1 delegation brief.*?It relaxes no tool, capability, permission, safety, trust-boundary, lens, scope, file-ownership, or destructive-action constraint.*?#### The barrier'
+        $Coordinator | Should -Match '(?s)Append this override verbatim to EVERY Wave 1 delegation brief.*?Exhaustive means greater depth inside the assigned goal, scope, and lens.*?#### The barrier'
+
+        # The indentation is the mechanism, not decoration: the override is a four-space block the
+        # coordinator copies verbatim, so bounds rendered at column zero would sit outside what gets
+        # copied and read as coordinator prose again. Containment alone cannot see that.
+        $Coordinator | Should -Match '(?m)^    Tier 5 changes only the depth of the answer'
+        $Coordinator | Should -Match '(?m)^    Exhaustive means greater depth inside the assigned goal'
+
+        $Coordinator | Should -Not -Match 'not permission to leave that lens'
         $Coordinator | Should -Not -Match 'cross-domain enhancements'
     }
 
@@ -1626,7 +1646,11 @@ Describe 'End-to-end workspace install' {
         # matter withholds. An expert has never been granted execute.
         $Expert | Should -Match 'You have no command-execution tool'
         $Expert | Should -Not -Match 'verification=executed'
-        $Expert | Should -Match 'evidence=source-read, reported-output, or both'
+
+        # Both roles read and cannot run, so an expert that only argued needs the same honest value
+        # the reviewer already carried. The two enums had drifted apart with no stated reason.
+        $Expert | Should -Match 'evidence=source-read, reported-output, both, or reasoning-only'
+        $Reviewer | Should -Match 'evidence=source-read, reported-output, both, or reasoning-only'
 
         # UNVERIFIED covers this in the expert. The reviewer has no UNVERIFIED field, so the residual
         # risk line is load-bearing there and must survive under whatever name it carries.
@@ -1828,7 +1852,12 @@ Describe 'End-to-end workspace install' {
         # re-dispatching a transient failure told the coordinator to pay the long wait twice.
         $Coordinator | Should -Match 'Do not re-dispatch the same model on the same brief'
         $Coordinator | Should -Not -Match 're-dispatch it once when the failure looks transient'
-        $Coordinator | Should -Match 'STALL:'
+
+        # The definition taught STALL while the closed enum the coordinator must emit said STALLED,
+        # so the prompt named one token and demanded another.
+        $Coordinator | Should -Match '(?m)^- STALLED:'
+        $Coordinator | Should -Match 'branch status of RETURNED, FAILED, STALLED, or DEGRADED'
+        $Coordinator | Should -Not -Match '(?m)^- STALL:'
 
         # The resume path is the other way back into the same trap.
         $Coordinator | Should -Match 'does not go back on NEED for the same model and the same brief'
@@ -1843,6 +1872,192 @@ Describe 'End-to-end workspace install' {
         # Measured this session: the preview model returned only on the shortest brief it was given.
         $Coordinator | Should -Match 'elevated latency risk'
         $Coordinator | Should -Match 'narrowest brief that still covers its lens'
+    }
+
+    It 'counts evidence by origin rather than by how many experts repeated it' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+
+        # The coordinator is ordered to put shared facts in every brief, so it manufactures the
+        # convergence it then has to weigh. The old text named only the same-file cause, which is
+        # the one cause the coordinator does not create itself.
+        $Coordinator | Should -Match 'comes back from every branch as one origin rather than five'
+        $Coordinator | Should -Match 'Count distinct origins instead of agreeing reports'
+
+        # Four echoes of a briefed premise must not outrank one branch that checked something.
+        $Coordinator | Should -Match 'A claim is not weaker for having been found by only one expert'
+        $Coordinator | Should -Match '(?m)^- MINORITY REVERSAL:'
+
+        # The expert half is the mechanism that actually worked when a false premise was seeded into
+        # every brief: exactly one branch re-checked the fact its conclusion depended on and caught it.
+        $Expert | Should -Match 'unless your conclusion depends on one of those facts'
+        $Expert | Should -Match 'name it on your VERIFIED line'
+        $Expert | Should -Match 'counts once however many branches repeat it'
+    }
+
+    It 'drops only the conclusions a dead premise was carrying' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # A report whose premise the coordinator just disproved is not merely a competing opinion,
+        # and the rest of that report is still worth what it was worth.
+        $Coordinator | Should -Match 'name the conclusions that used it, drop only those from consensus'
+        $Coordinator | Should -Match 'never the whole roster'
+
+        # The premise most likely to die is one the coordinator seeded into every brief, and the
+        # singular wording would have left four identical conclusions standing on it.
+        $Coordinator | Should -Match 'If the dead premise is one you supplied to every brief'
+
+        # FAILED caps its remedy at one re-dispatch. An uncapped recovery path beside it is how a
+        # single dead premise turns into a second full roster.
+        $Coordinator | Should -Match 'Re-dispatch at most once per affected lens'
+
+        # Without this, every new fact makes every earlier report suspect and the tier runs again.
+        $Coordinator | Should -Match 'does not qualify merely because newer information exists'
+    }
+
+    It 'gates what cannot be undone without gating ordinary engineering' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        $Coordinator | Should -Match '(?m)^## Actions you cannot take back'
+
+        # Reversibility-by-repository-restore is the wrong axis: a package restore writes to a global
+        # cache that no repository restore undoes, so that rule would have gated its own allowed list.
+        # The boundary is who else can see the effect, not where the bytes landed.
+        $Coordinator | Should -Match 'leave this working copy and become visible to other people or systems'
+        $Coordinator | Should -Match 'package restore'
+
+        # "Ship it" said once must not authorize an irreversible step chosen much later.
+        $Coordinator | Should -Match 'name the step rather than the goal'
+
+        # A code deletion is an edit, and an edit is rebuildable from git, so it lands inside this
+        # grant and outside this gate while the stricter removal rule below still forbids it.
+        # Co-existence was not enough; precedence had to be stated.
+        $Coordinator | Should -Match 'Where another rule here already requires approval, that rule stands'
+
+        # The separate removal gate is older and stricter, and this must not have replaced it.
+        $Coordinator | Should -Match 'Never remove code as part of a change you were asked to make'
+    }
+
+    It 'resolves a prerequisite before it fans out and keeps every parallel brief on one objective' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+
+        # Both halves have to survive together. Dropping either one turns the rule into "always
+        # parallel" or "always serial", and the second is the more expensive mistake.
+        $Coordinator | Should -Match 'Never serialize independent work'
+        $Coordinator | Should -Match 'never fan out a branch whose brief would be empty without another branch''s findings'
+        $Coordinator | Should -Match 'when you cannot tell which you have, resolve the prerequisite first'
+
+        # A specialist optimizing its own lens against the user's actual goal is the failure here,
+        # so the shared terms are identical across branches and the lens is subordinate to them.
+        $Coordinator | Should -Match 'identical in every parallel brief'
+        $Coordinator | Should -Match 'A lens narrows what a branch looks at and never overrides those shared terms'
+        $Expert | Should -Match 'The coordinator resolves it; you surface it'
+
+        # A lens must yield to the user's stated objective, except where satisfying that objective is
+        # itself the harm the lens exists to catch. Told to stop at one line, a security expert that
+        # finds the hard constraint IS the vulnerability would hand up a note nobody could act on.
+        $Expert | Should -Match 'a shared term that would itself cause the harm your lens exists to catch'
+        $Expert | Should -Not -Match 'report that conflict in one line and leave it there'
+    }
+
+    It 'keeps one writer and says so in both roles' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $Expert = Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md')
+
+        # No agent on the coordinator's allowlist holds an edit tool, so the old permission to
+        # delegate an edit could never be exercised. A conditional permission with an impossible
+        # action still reads as a permission, and the "never let two agents edit" caution that
+        # followed it made the impossible sound merely risky.
+        $Coordinator | Should -Match 'You are the only agent here that can write'
+        $Coordinator | Should -Not -Match 'Delegate edits only when file ownership boundaries'
+        $Coordinator | Should -Not -Match 'never let two agents edit the same file'
+
+        # Two experts recommending changes to one file is the real version of that risk.
+        $Coordinator | Should -Match 'reconcile them into one coherent edit'
+
+        # The expert's side said "unless the brief assigns you a file and your tools allow it",
+        # which invited it to look for a grant that does not exist.
+        $Expert | Should -Match 'You have no edit tool, so never report a file as changed'
+        $Expert | Should -Not -Match 'unless the brief explicitly assigns you a file'
+
+        # Both prompts now assert as fact that no worker can write. The front-matter tests compare
+        # against these same constants, so granting a worker edit would update the expectation and
+        # the front matter together and leave the suite green while both sentences became false.
+        $script:ExpertAgentTools | Should -Not -Contain 'edit'
+        $script:ExpertAgentTools | Should -Not -Contain 'execute'
+        $script:ReviewerAgentTools | Should -Not -Contain 'edit'
+        $script:ReviewerAgentTools | Should -Not -Contain 'execute'
+    }
+
+    It 'pins the Wave 2 floor as a whole paragraph so a contradiction cannot be appended to it' {
+        & $script:InstallerPath `
+            -Scope Workspace `
+            -WorkspacePath $script:InstallTestRoot `
+            -NonInteractive `
+            -SkipUpdateCheck `
+            -SkipVSCodeSetting `
+            -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $Coordinator = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+
+        # Measured: appending "When all experts agree and no conflict is visible, you may skip Wave 2
+        # entirely" to this paragraph, while leaving every asserted phrase in place, left all 134
+        # tests green. Deleting a phrase was caught; negating the rule beside it was not. Pinning the
+        # paragraph to its terminating blank line is what makes an append fail too. Guarding instead
+        # against one imagined contradiction would only ban the single phrasing written here.
+        $FloorParagraph = 'Skip Wave 2 only when every load-bearing claim you would publish is already settled by evidence you verified yourself in this turn. Expert agreement is not a skip condition, confidence is not a skip condition, and an empty conflict state is not a skip condition. Convergence is what a shared blind spot looks like from the inside, which is exactly why the floor is not optional.'
+        $NextParagraph = 'Never invent a disagreement the reports do not contain, and never brief a reviewer to find fault with a claim a tool already settled.'
+
+        # Pinning the pair with only a blank line permitted between them also closes the gap where a
+        # contradiction is inserted as its own paragraph immediately after the floor.
+        $Coordinator | Should -Match ([regex]::Escape($FloorParagraph) + '\r?\n\r?\n' + [regex]::Escape($NextParagraph))
     }
 
     It 'gives a reviewer a way to say it could not check' {
@@ -2095,6 +2310,390 @@ Describe 'End-to-end workspace install' {
                 -SkipVSCodeSetting `
                 -Models 'Claude Opus 5'
         } | Should -Throw '*not an existing directory*'
+    }
+}
+
+Describe 'Role-based model registry' {
+
+    Context 'Front matter round trip' {
+
+        It 'keeps a single model as a scalar so an unchanged install rewrites nothing' {
+            $FrontMatter = New-AgentFrontMatter `
+                -Name 'X' -Description 'd' -Model 'Claude Opus 5' `
+                -UserInvocable $false -DisableModelInvocation $false -Tools @('read')
+
+            $FrontMatter | Should -Match '(?m)^model: "Claude Opus 5"$'
+            $FrontMatter | Should -Not -Match '(?m)^model: \['
+        }
+
+        It 'emits an ordered array only when a fallback exists' {
+            $FrontMatter = New-AgentFrontMatter `
+                -Name 'X' -Description 'd' -Model 'Claude Opus 5' -ModelFallback @('Grok 4.5', 'Auto') `
+                -UserInvocable $false -DisableModelInvocation $false -Tools @('read')
+
+            # VS Code documents that a model array is tried in order, so order is the contract.
+            $FrontMatter | Should -Match "(?m)^model: \['Claude Opus 5', 'Grok 4\.5', 'Auto'\]$"
+        }
+
+        It 'collapses a fallback that repeats the preferred model' {
+            $FrontMatter = New-AgentFrontMatter `
+                -Name 'X' -Description 'd' -Model 'Claude Opus 5' -ModelFallback @('claude opus 5') `
+                -UserInvocable $false -DisableModelInvocation $false -Tools @('read')
+
+            $FrontMatter | Should -Match '(?m)^model: "Claude Opus 5"$'
+        }
+
+        It 'reads back <Label>' -ForEach @(
+            @{ Label = 'a legacy quoted scalar'; Value = '"Claude Opus 5"'; Expected = @('Claude Opus 5') }
+            @{ Label = 'an ordered array'; Value = "['Claude Opus 5', 'Grok 4.5']"; Expected = @('Claude Opus 5', 'Grok 4.5') }
+            @{ Label = 'a single-entry array'; Value = "['Grok 4.5']"; Expected = @('Grok 4.5') }
+            @{ Label = 'a trailing comma'; Value = "['Grok 4.5',]"; Expected = @('Grok 4.5') }
+            @{ Label = 'mixed quoting'; Value = "['Grok 4.5', ""Claude Opus 5""]"; Expected = @('Grok 4.5', 'Claude Opus 5') }
+            @{ Label = 'a name containing parentheses'; Value = "'Gemini 3.1 Pro (Preview)'"; Expected = @('Gemini 3.1 Pro (Preview)') }
+            @{ Label = 'an empty array'; Value = '[]'; Expected = @() }
+        ) {
+            $Recovered = @(ConvertFrom-FrontMatterModelValue -Value $Value)
+
+            $Recovered.Count | Should -Be $Expected.Count
+
+            for ($Index = 0; $Index -lt $Expected.Count; $Index++)
+            {
+                $Recovered[$Index] | Should -BeExactly $Expected[$Index]
+            }
+        }
+
+        It 'recovers a roster written with a fallback array instead of losing the coordinator model' {
+            $Directory = Join-Path $TestDrive 'array-roster'
+            New-Item -Path $Directory -ItemType Directory -Force | Out-Null
+
+            @(
+                '---'
+                'name: Multi-Model Engineering Council'
+                "model: ['Claude Opus 5', 'Grok 4.5']"
+                "agents: ['Claude Opus 5 Expert', 'Grok 4.5 Expert']"
+                '---'
+                ''
+                'Body.'
+            ) -join "`n" | Set-Content -LiteralPath (Join-Path $Directory 'multi-model-engineering-council.agent.md')
+
+            $Recovered = Get-PreviousCouncilConfiguration -AgentDirectory $Directory -CoordinatorFileName 'multi-model-engineering-council.agent.md'
+
+            # The old parser matched a quoted scalar only. Against an array it found nothing and
+            # silently substituted the first expert's model, losing a distinct coordinator choice.
+            $Recovered.CoordinatorModel | Should -BeExactly 'Claude Opus 5'
+            $Recovered.CoordinatorModelFallback | Should -Be @('Grok 4.5')
+            $Recovered.Models | Should -Be @('Claude Opus 5', 'Grok 4.5')
+        }
+
+        It 'still recovers a legacy scalar installation' {
+            $Directory = Join-Path $TestDrive 'legacy-roster'
+            New-Item -Path $Directory -ItemType Directory -Force | Out-Null
+
+            @(
+                '---'
+                'name: Multi-Model Engineering Council'
+                'model: "Grok 4.5"'
+                "agents: ['Claude Opus 5 Expert', 'Grok 4.5 Expert']"
+                '---'
+                ''
+                'Body.'
+            ) -join "`n" | Set-Content -LiteralPath (Join-Path $Directory 'multi-model-engineering-council.agent.md')
+
+            $Recovered = Get-PreviousCouncilConfiguration -AgentDirectory $Directory -CoordinatorFileName 'multi-model-engineering-council.agent.md'
+
+            $Recovered.CoordinatorModel | Should -BeExactly 'Grok 4.5'
+            @($Recovered.CoordinatorModelFallback).Count | Should -Be 0
+        }
+
+        It 'validates both model forms and rejects a mismatch' {
+            $Arguments = @{
+                Name = 'X'; Description = 'd'; UserInvocable = $false
+                DisableModelInvocation = $false; Tools = @('read')
+            }
+
+            $Body = "`n`n" + ('x' * 300)
+            $Scalar = (New-AgentFrontMatter @Arguments -Model 'Grok 4.5') + $Body
+            $Array = (New-AgentFrontMatter @Arguments -Model 'Grok 4.5' -ModelFallback @('Claude Opus 5')) + $Body
+
+            $Expectation = @{
+                ExpectedName = 'X'; ExpectedUserInvocable = $false
+                ExpectedDisableModelInvocation = $false; ExpectedTools = @('read')
+            }
+
+            { Test-AgentFile -Content $Scalar -Source 's' -ExpectedModel 'Grok 4.5' @Expectation } | Should -Not -Throw
+            { Test-AgentFile -Content $Array -Source 's' -ExpectedModel 'Grok 4.5' -ExpectedModelFallback @('Claude Opus 5') @Expectation } | Should -Not -Throw
+
+            # A validator that accepted either shape regardless would not notice a dropped fallback.
+            { Test-AgentFile -Content $Array -Source 's' -ExpectedModel 'Grok 4.5' @Expectation } | Should -Throw
+        }
+    }
+
+    Context 'Resolution and fallback' {
+
+        It 'keeps the preferred model first and reports nothing when the catalog has it' {
+            $Result = Resolve-RoleModelChain -Role 'code-investigator' `
+                -Candidate @('Claude Opus 5', 'Grok 4.5') `
+                -Catalog @('Claude Opus 5', 'Grok 4.5') -CatalogIsAuthoritative $true
+
+            $Result.Ok | Should -BeTrue
+            $Result.Preferred | Should -BeExactly 'Claude Opus 5'
+            $Result.Fallback | Should -Be @('Grok 4.5')
+            $Result.Unavailable.Count | Should -Be 0
+            $Result.Explanation | Should -BeNullOrEmpty
+        }
+
+        It 'names the unavailable model and the fallback that should take over' {
+            $Result = Resolve-RoleModelChain -Role 'security-reviewer' `
+                -Candidate @('Missing Model 9', 'Grok 4.5') `
+                -Catalog @('Grok 4.5') -CatalogIsAuthoritative $true
+
+            $Result.Unavailable | Should -Be @('Missing Model 9')
+            $Result.Explanation | Should -Match 'Missing Model 9'
+            $Result.Explanation | Should -Match 'Grok 4\.5'
+
+            # Never pruned: VS Code walks the array at run time, so removing an entry here would
+            # make the generated bytes depend on which machine produced them.
+            $Result.Chain | Should -Be @('Missing Model 9', 'Grok 4.5')
+        }
+
+        It 'stays actionable when every configured model is missing' {
+            $Result = Resolve-RoleModelChain -Role 'test-engineer' `
+                -Candidate @('Nope One', 'Nope Two') `
+                -Catalog @('Grok 4.5') -CatalogIsAuthoritative $true
+
+            # Absence is never fatal. A stale or partial cache read must not brick an install.
+            $Result.Ok | Should -BeTrue
+            $Result.Explanation | Should -Match 'No model configured for role'
+        }
+
+        It 'claims nothing about availability when the catalog is only a guess' {
+            # Discovery failure substitutes the built-in list, which is a guess. Treating it as
+            # authority would let a stale eight-name list declare a real model missing.
+            $Result = Resolve-RoleModelChain -Role 'code-investigator' `
+                -Candidate @('Some New Model 7') `
+                -Catalog @('Claude Opus 5') -CatalogIsAuthoritative $false
+
+            $Result.Unavailable.Count | Should -Be 0
+            $Result.Unverified | Should -Be @('Some New Model 7')
+            $Result.Explanation | Should -BeNullOrEmpty
+        }
+
+        It 'refuses to let an expert fall back onto a model another seat already runs' {
+            # An expert running a peer's model would be challenged by that peer's reviewer, which
+            # removes the cross-model independence the whole council rests on.
+            $Result = Resolve-RoleModelChain -Role 'architecture-reviewer' `
+                -Candidate @('Claude Opus 5', 'Grok 4.5', 'GPT-5.6 Sol') `
+                -Catalog @() -CatalogIsAuthoritative $false `
+                -ExcludeFromFallback @('Grok 4.5')
+
+            $Result.Chain | Should -Be @('Claude Opus 5', 'GPT-5.6 Sol')
+            $Result.ExcludedFromFallback | Should -Be @('Grok 4.5')
+        }
+
+        It 'keeps the preferred seat even when that model is seated elsewhere' {
+            $Result = Resolve-RoleModelChain -Role 'code-investigator' `
+                -Candidate @('Grok 4.5') -Catalog @() -CatalogIsAuthoritative $false `
+                -ExcludeFromFallback @('Grok 4.5')
+
+            $Result.Preferred | Should -BeExactly 'Grok 4.5'
+        }
+
+        It 'rejects an unusable name and says what to do about it' {
+            $Result = Resolve-RoleModelChain -Role 'test-engineer' `
+                -Candidate @('bad "name"') -Catalog @() -CatalogIsAuthoritative $false
+
+            $Result.Ok | Should -BeFalse
+            $Result.Rejected | Should -Be @('bad "name"')
+            $Result.Explanation | Should -Match '-Models'
+        }
+
+        It 'ships an empty registry so the default install is unchanged' {
+            $RoleModelRegistry.Count | Should -Be 0
+            $ModelAliasMap.Count | Should -Be 0
+            $ModelLifecycle.Count | Should -Be 0
+
+            @(Get-RoleFallbackCandidate -RoleId 'code-investigator').Count | Should -Be 0
+            Resolve-ModelAlias -Name 'Claude Opus 5' | Should -BeExactly 'Claude Opus 5'
+            Get-ModelLifecycleRecord -Name 'Claude Opus 5' | Should -BeNullOrEmpty
+        }
+
+        It 'gives every lens a stable role identifier that is not its title' {
+            # Titles are prose and get reworded. A pinned preference has to survive that.
+            $Roles = @($LensCatalog | ForEach-Object { $_.Role })
+
+            $Roles.Count | Should -Be $MaxModelCount
+            @($Roles | Select-Object -Unique).Count | Should -Be $MaxModelCount
+            $Roles | Should -Contain 'security-reviewer'
+            $Roles | Should -Contain 'performance-operations'
+
+            foreach ($Lens in $LensCatalog)
+            {
+                $Lens.Role | Should -Not -Be $Lens.Title
+            }
+        }
+    }
+
+    Context 'Optional local policy' {
+
+        BeforeEach {
+            $script:PolicyFile = Join-Path $TestDrive "policy-$([guid]::NewGuid().ToString('N')).json"
+        }
+
+        It 'treats no policy as unrestricted' {
+            (Test-ModelPolicyDecision -Policy $null -Name 'Anything At All').Allowed | Should -BeTrue
+        }
+
+        It 'permits a model on the allow list and refuses one that is absent from it' {
+            '{ "allowedModels": ["Grok 4.5"] }' | Set-Content -LiteralPath $script:PolicyFile
+            $Policy = Import-CouncilPolicy -Path $script:PolicyFile
+
+            (Test-ModelPolicyDecision -Policy $Policy -Name 'Grok 4.5').Allowed | Should -BeTrue
+            (Test-ModelPolicyDecision -Policy $Policy -Name 'Claude Opus 5').Allowed | Should -BeFalse
+        }
+
+        It 'lets a block list override an allow list' {
+            '{ "allowedModels": ["Grok 4.5"], "blockedModels": ["Grok 4.5"] }' | Set-Content -LiteralPath $script:PolicyFile
+            $Policy = Import-CouncilPolicy -Path $script:PolicyFile
+
+            (Test-ModelPolicyDecision -Policy $Policy -Name 'Grok 4.5').Allowed | Should -BeFalse
+        }
+
+        It 'reads a declared but empty allow list as permitting nothing' {
+            # Present-but-empty is a real policy. Reading it as "no policy" would silently install
+            # a configuration the user believes was checked.
+            '{ "allowedModels": [] }' | Set-Content -LiteralPath $script:PolicyFile
+            $Policy = Import-CouncilPolicy -Path $script:PolicyFile
+
+            $Policy.AllowListDeclared | Should -BeTrue
+            (Test-ModelPolicyDecision -Policy $Policy -Name 'Grok 4.5').Allowed | Should -BeFalse
+        }
+
+        It 'treats an absent allow list as no restriction' {
+            '{ "blockedModels": ["Nope"] }' | Set-Content -LiteralPath $script:PolicyFile
+            $Policy = Import-CouncilPolicy -Path $script:PolicyFile
+
+            $Policy.AllowListDeclared | Should -BeFalse
+            (Test-ModelPolicyDecision -Policy $Policy -Name 'Grok 4.5').Allowed | Should -BeTrue
+        }
+
+        It 'stops on a policy it cannot read rather than installing unchecked' {
+            '{ not json' | Set-Content -LiteralPath $script:PolicyFile
+
+            { Import-CouncilPolicy -Path $script:PolicyFile } | Should -Throw
+            { Import-CouncilPolicy -Path (Join-Path $TestDrive 'absent.json') } | Should -Throw
+        }
+
+        It 'rejects a policy source URL it would otherwise print or store' -ForEach @(
+            @{ Label = 'a non-https scheme'; Url = 'http://example.invalid/policy' }
+            @{ Label = 'a local file scheme'; Url = 'file:///C:/policy.txt' }
+            @{ Label = 'embedded credentials'; Url = 'https://user:pass@example.invalid/p' }
+            @{ Label = 'a relative value'; Url = 'not-a-url' }
+        ) {
+            # The URL is recorded and displayed, never fetched, so validation only has to make it
+            # safe to print and to write.
+            (Test-CitationUrl -Url $Url) | Should -BeFalse
+
+            (('{ "sourceUrl": "' + $Url + '" }')) | Set-Content -LiteralPath $script:PolicyFile
+            { Import-CouncilPolicy -Path $script:PolicyFile } | Should -Throw
+        }
+
+        It 'accepts a plain https source and records it without fetching' {
+            (Test-CitationUrl -Url 'https://example.invalid/policy') | Should -BeTrue
+
+            '{ "sourceUrl": "https://example.invalid/policy", "dateLastReviewed": "2026-01-01", "notes": "local" }' |
+                Set-Content -LiteralPath $script:PolicyFile
+
+            $Policy = Import-CouncilPolicy -Path $script:PolicyFile
+            $Policy.SourceUrl | Should -BeExactly 'https://example.invalid/policy'
+            $Policy.DateLastReviewed | Should -BeExactly '2026-01-01'
+        }
+
+        It 'rejects a URL carrying control characters that could rewrite a console line' {
+            # Built from a code point rather than an escape: backtick-e is PowerShell 6 and later,
+            # and this suite has to parse on Windows PowerShell 5.1 as well.
+            $Escape = [string][char]27
+            $NewLine = [string][char]10
+
+            (Test-CitationUrl -Url "https://example.invalid/$Escape[2K") | Should -BeFalse
+            (Test-CitationUrl -Url "https://example.invalid/a$($NewLine)b") | Should -BeFalse
+        }
+    }
+
+    Context 'Organization neutrality' {
+
+        It 'ships no organization-specific policy default' {
+            # This is a public tool. A default that assumed one employer would be wrong for almost
+            # everyone who installs it. The author's own contact address is authorship metadata and
+            # is deliberately not what this checks.
+            $Installer = Get-Content -LiteralPath $script:InstallerPath -Raw
+
+            foreach ($Term in @('sharepoint', 'approved model list', 'internal only', 'data classification policy'))
+            {
+                $Installer | Should -Not -Match ([regex]::Escape($Term))
+            }
+
+            # The shipped policy surface has to be empty, not merely neutral-sounding, and a policy
+            # file is only ever opened when the caller names one.
+            $Installer | Should -Match '(?m)^\s*\$PolicyPath'
+            $Installer | Should -Match 'if \(-not \[string\]::IsNullOrWhiteSpace\(\$PolicyPath\)\)'
+        }
+
+        It 'never lets policy text reach a generated agent' {
+            # A generated agent is a system prompt for the one role holding edit and execute, so
+            # free-form policy prose there would be an instruction channel into it.
+            $InstallerText = Get-Content -LiteralPath $script:InstallerPath -Raw
+            $Generator = [regex]::Match($InstallerText, '(?s)function New-CoordinatorAgentContent.*?\n}\r?\n').Value
+
+            $Generator.Length | Should -BeGreaterThan 1000
+            $Generator | Should -Not -Match 'CouncilPolicy'
+            $Generator | Should -Not -Match 'PolicyPath'
+        }
+    }
+}
+
+Describe 'Model reference scanner' {
+
+    BeforeAll {
+        $script:ScannerPath = Join-Path $script:RepositoryRoot '.github\scripts\Scan-ModelReferences.ps1'
+    }
+
+    It 'exists and parses' {
+        Test-Path -LiteralPath $script:ScannerPath | Should -BeTrue
+
+        $ScannerTokens = $null
+        $ScannerErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($script:ScannerPath, [ref]$ScannerTokens, [ref]$ScannerErrors) | Out-Null
+        $ScannerErrors.Count | Should -Be 0
+    }
+
+    It 'reports references without changing anything' {
+        $Before = @(Get-ChildItem -LiteralPath $script:RepositoryRoot -Recurse -File |
+                ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length })
+
+        $Report = & $script:ScannerPath 2>&1 | Out-String
+
+        $Report | Should -Match 'Report only\. No file was modified\.'
+        $Report | Should -Match 'OUTSIDE THE CENTRAL REGISTRY'
+
+        $After = @(Get-ChildItem -LiteralPath $script:RepositoryRoot -Recurse -File |
+                ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length })
+
+        @(Compare-Object -ReferenceObject $Before -DifferenceObject $After).Count | Should -Be 0
+    }
+
+    It 'does not report a model name that only appears inside an English word' {
+        # A vendor-word scan matches Sol inside Console and resolve, which buries the real findings.
+        $Report = & $script:ScannerPath 2>&1 | Out-String
+
+        $Report | Should -Not -Match 'resolve'
+        $Report | Should -Not -Match 'Console'
+    }
+
+    It 'recommends no replacement while the alias map is empty' {
+        $Report = & $script:ScannerPath 2>&1 | Out-String
+
+        $Report | Should -Match 'RECORDED RENAMES \(0\)'
+        $Report | Should -Match 'none recorded'
     }
 }
 
