@@ -203,7 +203,7 @@
         August 31st, 2026
 
     Version:
-        5.16.0
+        5.17.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -381,7 +381,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.16.0'
+$ScriptVersion = '5.17.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -887,7 +887,17 @@ function Read-Utf8File
 
     try
     {
-        return [System.IO.File]::ReadAllText($Path, $StrictUtf8)
+        # Decoded from bytes rather than through File::ReadAllText, whose StreamReader detects a
+        # preamble and silently swaps in the permissive decoder, or UTF-16 entirely, for exactly the
+        # files most likely to have been written by another tool.
+        $Bytes = [System.IO.File]::ReadAllBytes($Path)
+
+        if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF)
+        {
+            return $StrictUtf8.GetString($Bytes, 3, $Bytes.Length - 3)
+        }
+
+        return $StrictUtf8.GetString($Bytes)
     }
     catch [System.Text.DecoderFallbackException]
     {
@@ -906,12 +916,22 @@ function Get-FileStateSnapshot
     )
 
     $Exists = [System.IO.File]::Exists($Path)
+    $Bytes = $null
+    $Attributes = $null
+
+    if ($Exists)
+    {
+        # Assigned rather than emitted from a subexpression, which enumerates the array and hands
+        # back $null for an empty file and a bare byte for a one-byte file. Restoring either throws.
+        $Bytes = [System.IO.File]::ReadAllBytes($Path)
+        $Attributes = [System.IO.File]::GetAttributes($Path)
+    }
 
     return [PSCustomObject]@{
         Path = $Path
         Existed = $Exists
-        Bytes = $(if ($Exists) { [System.IO.File]::ReadAllBytes($Path) } else { $null })
-        Attributes = $(if ($Exists) { [System.IO.File]::GetAttributes($Path) } else { $null })
+        Bytes = $Bytes
+        Attributes = $Attributes
     }
 }
 
@@ -1606,6 +1626,15 @@ function Import-CouncilPolicy
         throw "Policy file could not be parsed as JSON: $Path. $($_.Exception.Message)"
     }
 
+    # A root that is not an object parses cleanly and then reads as no policy at all, which is the
+    # one outcome an explicitly supplied policy must never produce. Tested against the raw text
+    # rather than the parsed result, because the two supported editions disagree about what a
+    # top-level array deserializes to, and 7 disagrees with itself between one element and several.
+    if ($Raw -notmatch '(?s)^\s*\{')
+    {
+        throw "Policy file root is not a JSON object: $Path. Wrap the settings in a single { } object, then re-run."
+    }
+
     $Allowed = @(@(Get-PropertyValue -InputObject $Parsed -Name 'allowedModels') | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") } | ForEach-Object { "$_".Trim() })
     $Blocked = @(@(Get-PropertyValue -InputObject $Parsed -Name 'blockedModels') | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") } | ForEach-Object { "$_".Trim() })
     $Classifications = @(@(Get-PropertyValue -InputObject $Parsed -Name 'restrictedDataClassifications') | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") } | ForEach-Object { "$_".Trim() })
@@ -1620,6 +1649,8 @@ function Import-CouncilPolicy
     # An allowlist key that is present but empty means nothing is permitted. That is a real policy
     # and it must not be silently read as no policy at all. Tested against the property rather than
     # its value, because $null -ne @() filters the array instead of comparing it and yields false.
+    # A dictionary shape is not handled here on purpose: ConvertFrom-Json throws on keys that differ
+    # only by case, so the catch above already stops that file and $Parsed is always a PSObject.
     $AllowListDeclared = $null -ne $Parsed.PSObject.Properties['allowedModels']
 
     return [PSCustomObject]@{
@@ -2382,9 +2413,11 @@ function Get-RecommendedModelSet
 
     $SeenCatalogNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 
+    # Internal-only builds are excluded from the recommendation but stay selectable by number: they
+    # are listed for the people they are meant for and must not be the default suggested to everyone.
     $Candidates = @(
         $Catalog |
-            Where-Object { (Test-ModelName -Name $_) -and $_ -notmatch '(?i)^auto$' -and $SeenCatalogNames.Add($_) } |
+            Where-Object { (Test-ModelName -Name $_) -and $_ -notmatch '(?i)^auto$' -and $_ -notmatch '(?i)\binternal[\s\-]*only\b' -and $SeenCatalogNames.Add($_) } |
             ForEach-Object {
                 $Category = ''
 
@@ -5019,19 +5052,12 @@ Complete-InstallStep
 
 Start-InstallStep -Name 'Prepare agent directory'
 
-if (-not (Test-Path -LiteralPath $AgentDirectory))
-{
-    New-Item -Path $AgentDirectory -ItemType Directory -Force | Out-Null
-    Write-Console "Created agent directory: $AgentDirectory"
-}
-else
-{
-    Write-Console "Using agent directory: $AgentDirectory"
-}
-
 # A junction or symlink anywhere above the agent files silently redirects every write, and the
 # stale sweep would remove matching files in the link target rather than in the directory the user
 # named. Writing through a deliberate link is supported; deleting through one is not.
+#
+# Probed before the directory is created, because New-Item -Force would otherwise materialize one
+# inside the link target before anything had looked.
 $AgentDirectoryIsLinked = $false
 $AgentDirectoryLinkTarget = $null
 
@@ -5054,7 +5080,17 @@ for ($LinkProbe = $AgentDirectory; -not [string]::IsNullOrEmpty($LinkProbe); $Li
 
 if ($AgentDirectoryIsLinked)
 {
-    Write-Console "A link in the agent directory path sends writes somewhere else, so stale council files will be left in place rather than deleted through it: $AgentDirectoryLinkTarget" -Level 'Warning'
+    Write-Console "A link in the agent directory path sends every write somewhere else, so the agents will be created under $AgentDirectoryLinkTarget rather than where you asked, and stale council files will be left in place rather than deleted through it." -Level 'Warning'
+}
+
+if (-not (Test-Path -LiteralPath $AgentDirectory))
+{
+    New-Item -Path $AgentDirectory -ItemType Directory -Force | Out-Null
+    Write-Console "Created agent directory: $AgentDirectory"
+}
+else
+{
+    Write-Console "Using agent directory: $AgentDirectory"
 }
 
 $BackupDirectory = Join-Path -Path $HOME -ChildPath ".copilot\agent-backups\v5_$(Get-Date -Format 'yyyyMMdd_HHmmssfff')"
@@ -5566,6 +5602,14 @@ catch
         {
             try
             {
+                # A path this run never wrote is owed no undo, and restoring one would overwrite
+                # whatever else touched it while this run was in flight. The managed set includes
+                # stale files marked for deletion, which never gain an entry here.
+                if (-not $InstalledAgentBytes.ContainsKey($Snapshot.Path))
+                {
+                    continue
+                }
+
                 if (-not (Test-RestoreIsSafe -Path $Snapshot.Path -InstalledBytes $InstalledAgentBytes[$Snapshot.Path]))
                 {
                     $RollbackSkipped.Add($Snapshot.Path)
@@ -5586,14 +5630,19 @@ catch
             Write-Verbose ($RollbackSkipped -join [Environment]::NewLine)
         }
 
-        if ($RollbackFailures.Count -eq 0)
-        {
-            Write-Console 'Restored the previous agent files after the failed activation.' -Level 'Warning'
-        }
-        else
+        if ($RollbackFailures.Count -gt 0)
         {
             Write-Console "Agent rollback was incomplete. Use the backup directory to recover: $BackupDirectory" -Level 'Warning'
             Write-Verbose ($RollbackFailures -join [Environment]::NewLine)
+        }
+        elseif ($RollbackSkipped.Count -gt 0)
+        {
+            # Saying "restored" here would describe files this run deliberately left alone.
+            Write-Console 'Restored the previous agent files, except the ones listed above that changed after this run wrote them.' -Level 'Warning'
+        }
+        else
+        {
+            Write-Console 'Restored the previous agent files after the failed activation.' -Level 'Warning'
         }
     }
 

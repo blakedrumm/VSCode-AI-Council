@@ -5,6 +5,51 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.17.0
+
+A multi-model review of the installer turned up defects that every automated check had passed over,
+because each one produces a plausible-looking success rather than an error. The worst of them made
+the same policy file enforce an allowlist on PowerShell 7 and permit every model on 5.1.
+
+### Fixed
+
+- A `-PolicyPath` file whose root is not a JSON object no longer reads as no policy at all. A
+  top-level array parses cleanly, every property read returns nothing, and the run reports policy
+  success while permitting every model. The two supported editions disagreed about the parsed shape,
+  and PowerShell 7 disagreed with itself between a one-element array and a longer one, so the check
+  is made against the raw text where the answer is the same everywhere.
+- `Get-FileStateSnapshot` no longer collapses the bytes it captures. Emitting `ReadAllBytes` from a
+  `$()` subexpression enumerates the array, which returned nothing at all for an empty file and a
+  bare byte for a one-byte file. Restoring either threw, so a failed run reported that it could not
+  restore the settings file and left its own edit in place.
+- `Read-Utf8File` no longer loses its strictness on the files most likely to need it. Passing a
+  strict encoder to `File::ReadAllText` still builds a byte-order-mark-detecting reader, which
+  replaced the strict decoder whenever a preamble was present. A settings file saved with a UTF-8
+  BOM was silently rewritten without one, and a UTF-16 file was converted wholesale to UTF-8.
+- Rollback no longer restores files the run never wrote. The managed set includes stale leftovers
+  marked for deletion, which never receive a recorded byte array, so the safety check received
+  nothing, short-circuited, and rewrote them. A leftover deleted by something else mid-run was
+  re-created.
+- The agent directory is now probed for a junction or symbolic link before it is created rather than
+  after, so `New-Item -Force` can no longer materialize a directory inside the link target before
+  anything has looked. The warning also says where the files will actually land, instead of
+  mentioning only the stale sweep.
+- A failed run no longer claims it "restored the previous agent files" when it deliberately skipped
+  some of them because they changed after this run wrote them.
+
+### Changed
+
+- Models whose name marks them internal-only are no longer offered in the recommended set. They stay
+  listed and selectable by number for the people they are meant for; what changed is that the `[R]`
+  shortcut no longer hands one to everybody.
+
+### Notes
+
+- Preview models are still eligible for the recommended set. Excluding them was considered and
+  rejected: the only signal available is a marker in the display name, and on a real catalog the
+  exclusion changes which model holds a vendor seat without making that seat more reliable. The
+  existing preview warning already covers every path that selects one.
+
 ## 5.16.0
 
 Models get renamed, retired, and restricted, and until now a roster that stopped working produced

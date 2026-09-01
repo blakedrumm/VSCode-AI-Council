@@ -139,6 +139,30 @@ Describe 'PowerShell syntax' {
 }
 
 Describe 'Model input and recommendation' {
+
+    Context 'Internal-only builds' {
+
+        It 'never recommends an internal-only model' {
+            # It stays listed and selectable by number for the people it is meant for. What it must
+            # not be is the default the [R] shortcut hands to everyone.
+            $Catalog = @('Claude Opus 5', 'Gemini 3.7 Flash', 'GPT-5.6 Sol Fast (Internal only)', 'Grok 4.6')
+            $CategoryMap = @{
+                'Claude Opus 5' = 'powerful'
+                'Gemini 3.7 Flash' = 'versatile'
+                'GPT-5.6 Sol Fast (Internal only)' = 'powerful'
+                'Grok 4.6' = 'versatile'
+            }
+
+            $Recommended = @(Get-RecommendedModelSet -Catalog $Catalog -MaximumCount 5 -CategoryMap $CategoryMap -PreviewMap @{})
+
+            $Recommended | Should -Not -Contain 'GPT-5.6 Sol Fast (Internal only)'
+            $Recommended | Should -Contain 'Claude Opus 5'
+        }
+
+        It 'still accepts an internal-only name a user types deliberately' {
+            Test-ModelName -Name 'GPT-5.6 Sol Fast (Internal only)' | Should -BeTrue
+        }
+    }
     It 'accepts a normal model name' {
         Test-ModelName -Name 'Claude Opus 5' | Should -BeTrue
     }
@@ -556,6 +580,77 @@ Describe 'Environment-dependent helpers' {
 }
 
 Describe 'Atomic file writes' {
+
+    Context 'Snapshot fidelity' {
+
+        It 'keeps a real byte array for a <Size>-byte file' -ForEach @(
+            @{ Size = 0 }
+            @{ Size = 1 }
+            @{ Size = 5 }
+        ) {
+            # Emitting from a $() subexpression enumerates the array, which handed back $null for an
+            # empty file and a bare byte for a one-byte file. Restoring either one threw.
+            $Path = Join-Path $TestDrive "snapshot-$Size.bin"
+            [System.IO.File]::WriteAllBytes($Path, (New-Object byte[] $Size))
+
+            $Snapshot = Get-FileStateSnapshot -Path $Path
+
+            $Snapshot.Bytes -is [byte[]] | Should -BeTrue
+            $Snapshot.Bytes.Length | Should -Be $Size
+        }
+
+        It 'restores a zero-byte file instead of throwing' {
+            $Path = Join-Path $TestDrive 'snapshot-restore.bin'
+            [System.IO.File]::WriteAllBytes($Path, (New-Object byte[] 0))
+
+            $Snapshot = Get-FileStateSnapshot -Path $Path
+            [System.IO.File]::WriteAllBytes($Path, [byte[]](1, 2, 3))
+
+            { Restore-FileStateSnapshot -Snapshot $Snapshot } | Should -Not -Throw
+            (Get-Item -LiteralPath $Path).Length | Should -Be 0
+        }
+
+        It 'reports no bytes for a file that does not exist' {
+            $Snapshot = Get-FileStateSnapshot -Path (Join-Path $TestDrive 'never-existed.bin')
+
+            $Snapshot.Existed | Should -BeFalse
+            $Snapshot.Bytes | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Strict UTF-8 reads' {
+
+        It 'strips a UTF-8 byte order mark instead of letting it defeat the strict decoder' {
+            # File::ReadAllText builds a BOM-detecting StreamReader, which swapped in the permissive
+            # decoder for exactly the files another tool most likely wrote, and rewrote them without
+            # their BOM.
+            $Path = Join-Path $TestDrive 'bom.json'
+            [System.IO.File]::WriteAllBytes($Path, ([byte[]](0xEF, 0xBB, 0xBF)) + [System.Text.Encoding]::UTF8.GetBytes('{"a":1}'))
+
+            Read-Utf8File -Path $Path | Should -BeExactly '{"a":1}'
+        }
+
+        It 'refuses a UTF-16 file rather than silently converting it to UTF-8' {
+            $Path = Join-Path $TestDrive 'utf16.json'
+            [System.IO.File]::WriteAllBytes($Path, [System.Text.Encoding]::Unicode.GetPreamble() + [System.Text.Encoding]::Unicode.GetBytes('{"b":2}'))
+
+            { Read-Utf8File -Path $Path } | Should -Throw '*not valid UTF-8*'
+        }
+
+        It 'still refuses invalid UTF-8 that carries no byte order mark' {
+            $Path = Join-Path $TestDrive 'invalid.json'
+            [System.IO.File]::WriteAllBytes($Path, [byte[]](0x7B, 0xFF, 0xFE, 0x7D))
+
+            { Read-Utf8File -Path $Path } | Should -Throw '*not valid UTF-8*'
+        }
+
+        It 'round trips ordinary UTF-8 content unchanged' {
+            $Path = Join-Path $TestDrive 'plain.json'
+            Write-Utf8File -Path $Path -Content '{"c":3}'
+
+            Read-Utf8File -Path $Path | Should -Match '\{"c":3\}'
+        }
+    }
     BeforeEach {
         $script:WriteTestRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-write-$([guid]::NewGuid().ToString('N'))"
         New-Item -Path $script:WriteTestRoot -ItemType Directory -Force | Out-Null
@@ -2581,6 +2676,27 @@ Describe 'Role-based model registry' {
 
             { Import-CouncilPolicy -Path $script:PolicyFile } | Should -Throw
             { Import-CouncilPolicy -Path (Join-Path $TestDrive 'absent.json') } | Should -Throw
+        }
+
+        It 'stops on a policy whose root is not a JSON object' -ForEach @(
+            @{ Label = 'a single-element array'; Body = '[{ "allowedModels": ["Grok 4.5"] }]' }
+            @{ Label = 'a multi-element array'; Body = '[{ "a": 1 }, { "b": 2 }]' }
+            @{ Label = 'a bare string'; Body = '"just a string"' }
+            @{ Label = 'a bare number'; Body = '42' }
+        ) {
+            # A non-object root parses cleanly and then reads as no policy at all, so every model is
+            # permitted while the run reports policy success. The two editions disagreed about the
+            # parsed shape of an array, and 7 disagreed with itself between one element and several,
+            # so the same file enforced an allowlist on one machine and nothing on another.
+            $Body | Set-Content -LiteralPath $script:PolicyFile
+
+            { Import-CouncilPolicy -Path $script:PolicyFile } | Should -Throw '*root is not a JSON object*'
+        }
+
+        It 'still accepts an object root that is indented or padded' {
+            "`r`n   { `"allowedModels`": [`"Grok 4.5`"] }`r`n" | Set-Content -LiteralPath $script:PolicyFile
+
+            (Import-CouncilPolicy -Path $script:PolicyFile).AllowListDeclared | Should -BeTrue
         }
 
         It 'rejects a policy source URL it would otherwise print or store' -ForEach @(
