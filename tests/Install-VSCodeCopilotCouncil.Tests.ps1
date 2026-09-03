@@ -6,6 +6,8 @@ BeforeAll {
 
     $script:RepositoryRoot = Split-Path -Path $PSScriptRoot -Parent
     $script:InstallerPath = Join-Path -Path $script:RepositoryRoot -ChildPath 'Install-VSCodeCopilotCouncil-v5.ps1'
+    $script:ReadmePath = Join-Path -Path $script:RepositoryRoot -ChildPath 'README.md'
+    $script:RecommendationReviewPath = Join-Path -Path $script:RepositoryRoot -ChildPath '.github/model-recommendation-review.json'
     $Tokens = $null
     $ParseErrors = $null
     $script:InstallerAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -42,6 +44,7 @@ BeforeAll {
         'Test-ModelPolicyDecision',
         'Initialize-SqliteInterop',
         'ConvertFrom-ModelCacheJson',
+        'ConvertTo-OrdinalModelRecord',
         'Get-CachedModelRecord',
         'Get-VSCodeModelCatalog',
         'Get-PreviousCouncilConfiguration',
@@ -91,7 +94,7 @@ BeforeAll {
 
     # The generators read these script-level constants, so the harness has to load the real values
     # rather than restate them, or the tests would stop tracking the installer.
-    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'UntrustedContentPolicy', 'Tier5BoundsPolicy', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount', 'RoleModelRegistry', 'ModelAliasMap', 'ModelLifecycle', 'CoordinatorRoleId', 'ChallengerRoleId'))
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'UntrustedContentPolicy', 'Tier5BoundsPolicy', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount', 'DefaultModelCatalog', 'DefaultModelCategoryMap', 'RecommendationDate', 'RoleModelRegistry', 'ModelAliasMap', 'ModelLifecycle', 'CoordinatorRoleId', 'ChallengerRoleId'))
     {
         $ConstantAst = $script:InstallerAst.Find(
             {
@@ -211,6 +214,94 @@ Describe 'Model input and recommendation' {
         $Recommended.Count | Should -Be 2
     }
 
+    Context 'High-access reference review' {
+
+        It 'recomputes the checked-in recommendation with the shipping algorithm' {
+            $Review = [System.IO.File]::ReadAllText($script:RecommendationReviewPath) | ConvertFrom-Json
+            $Catalog = @($Review.catalog | ForEach-Object { $_.name })
+            $CategoryMap = @{}
+            $PreviewMap = @{}
+
+            foreach ($Record in $Review.catalog)
+            {
+                $CategoryMap[$Record.name] = $Record.category
+                $PreviewMap[$Record.name] = [bool]$Record.isPreview
+            }
+
+            $Actual = @(Get-RecommendedModelSet `
+                    -Catalog $Catalog `
+                    -MaximumCount $script:MaxModelCount `
+                    -CategoryMap $CategoryMap `
+                    -PreviewMap $PreviewMap)
+
+            $Actual | Should -Be @($Review.recommended)
+            $Actual.Count | Should -Be $script:MaxModelCount
+
+            foreach ($Name in $Actual)
+            {
+                $Record = @($Review.catalog | Where-Object { $_.name -ceq $Name })[0]
+                $Record.category | Should -Not -Be 'lightweight'
+                $Name | Should -Not -Match '(?i)^auto$|internal[\s\-]*only'
+            }
+        }
+
+        It 'keeps the review date and README example synchronized' {
+            $Review = [System.IO.File]::ReadAllText($script:RecommendationReviewPath) | ConvertFrom-Json
+            $ReviewedOn = [datetime]::ParseExact(
+                $Review.reviewedOn,
+                'yyyy-MM-dd',
+                [System.Globalization.CultureInfo]::InvariantCulture)
+            $DisplayDate = $ReviewedOn.ToString('MMMM d, yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+
+            $script:RecommendationDate | Should -Be $DisplayDate
+
+            $Readme = [System.IO.File]::ReadAllText($script:ReadmePath)
+            $Block = [regex]::Match(
+                $Readme,
+                '(?s)<!-- model-recommendation-review:start -->(?<Body>.*?)<!-- model-recommendation-review:end -->')
+            $Block.Success | Should -BeTrue
+            $Block.Groups['Body'].Value | Should -Match ([regex]::Escape("reviewed **$DisplayDate**"))
+
+            $RecommendedSet = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($Name in @($Review.recommended)) { [void]$RecommendedSet.Add($Name) }
+
+            $ExpectedLines = New-Object System.Collections.Generic.List[string]
+            for ($Index = 0; $Index -lt $Review.catalog.Count; $Index++)
+            {
+                if ($RecommendedSet.Contains($Review.catalog[$Index].name))
+                {
+                    $ExpectedLines.Add(('  * [{0}] {1}' -f ($Index + 1), $Review.catalog[$Index].name))
+                }
+            }
+
+            $ActualLines = @([regex]::Matches($Block.Groups['Body'].Value, '(?m)^  \* \[\d+\] [^\r\n]+\r?$') |
+                    ForEach-Object { $_.Value.TrimEnd("`r") })
+
+            $ActualLines | Should -Be $ExpectedLines.ToArray()
+        }
+
+        It 'keeps the built-in fallback capable of reproducing the reviewed frontier set' {
+            $Review = [System.IO.File]::ReadAllText($script:RecommendationReviewPath) | ConvertFrom-Json
+
+            foreach ($Name in @($Review.recommended))
+            {
+                $script:DefaultModelCatalog | Should -Contain $Name
+                $script:DefaultModelCategoryMap.ContainsKey($Name) | Should -BeTrue
+
+                $Record = @($Review.catalog | Where-Object { $_.name -ceq $Name })[0]
+                $script:DefaultModelCategoryMap[$Name] | Should -Be $Record.category
+            }
+
+            $Fallback = @(Get-RecommendedModelSet `
+                    -Catalog $script:DefaultModelCatalog `
+                    -MaximumCount $script:MaxModelCount `
+                    -CategoryMap $script:DefaultModelCategoryMap `
+                    -PreviewMap @{})
+
+            $Fallback | Should -Be @($Review.recommended)
+        }
+    }
+
     It 'treats uppercase C as the custom-model command' {
         $script:PickerResponses = [System.Collections.Generic.Queue[string]]::new()
         @('C', 'Custom Model', 'Y') | ForEach-Object { $script:PickerResponses.Enqueue($_) }
@@ -235,6 +326,24 @@ Describe 'VS Code model-cache resilience' {
         $Records.Count | Should -Be 2
         $Records[0].identifier | Should -Be 'one'
         $Records[1].identifier | Should -Be 'two'
+    }
+
+    It 'orders catalog names identically on both PowerShell editions' {
+        $Records = @(
+            [PSCustomObject]@{ Name = 'MAI-Code-1.1-Flash' },
+            [PSCustomObject]@{ Name = 'MAI-Code-1-Flash' },
+            [PSCustomObject]@{ Name = 'Gemini 3.7 Flash' },
+            [PSCustomObject]@{ Name = 'GPT-5.6 Sol' }
+        )
+
+        $Sorted = @(ConvertTo-OrdinalModelRecord -Record $Records)
+
+        @($Sorted | ForEach-Object { $_.Name }) | Should -Be @(
+            'Gemini 3.7 Flash',
+            'GPT-5.6 Sol',
+            'MAI-Code-1-Flash',
+            'MAI-Code-1.1-Flash'
+        )
     }
 
     It 'does not trust an older same-namespace SQLite wrapper' {

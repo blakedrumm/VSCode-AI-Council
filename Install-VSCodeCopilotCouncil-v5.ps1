@@ -83,9 +83,10 @@
     nothing across vendors.
 
     The size classification is read from the model cache rather than guessed from the name, so a
-    model whose name carries no size hint is still classified correctly. When no cache is available,
-    for example with -ModelCatalog, the picker falls back to name-based rules and the recommendation
-    is correspondingly weaker. The picker prints the date the rule was last revised alongside it.
+    model whose name carries no size hint is still classified correctly. The built-in fallback list
+    carries the size categories from its latest review. A list supplied with -ModelCatalog has no
+    category metadata, so only that path falls back to weaker name-based rules. The picker prints
+    the date the recommendation rules and fallback snapshot were last reviewed alongside the result.
 
     Existing agent files and VS Code settings are backed up before modification and restored if
     agent activation fails before the new roster is fully validated. Older backup folders beyond the
@@ -426,24 +427,45 @@ $ScriptVersion = '5.18.0'
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
 
-# Only used when the live model list cannot be read from the VS Code cache. These names will go
-# stale as models are retired, which is exactly why the cache is preferred over this list.
+# Only used when the live model list cannot be read from the VS Code cache. These names and their
+# categories will go stale as models change, which is exactly why the cache is preferred. The
+# maintainer recommendation review refreshes both together before a push.
 $DefaultModelCatalog = @(
     'Claude Haiku 4.5',
     'Claude Opus 5',
     'Claude Sonnet 5',
     'Gemini 3.5 Flash',
+    'Gemini 3.7 Flash',
     'GPT-5 mini',
+    'GPT-5.3-Codex',
+    'GPT-5.6 Luna',
     'GPT-5.6 Sol',
     'GPT-5.6 Terra',
-    'Grok 4.5'
+    'Grok 4.6',
+    'MAI-Code-1.1-Flash'
 )
+
+$DefaultModelCategoryMap = @{
+    'Claude Haiku 4.5' = 'lightweight'
+    'Claude Opus 5' = 'powerful'
+    'Claude Sonnet 5' = 'versatile'
+    'Gemini 3.5 Flash' = 'lightweight'
+    'Gemini 3.7 Flash' = 'versatile'
+    'GPT-5 mini' = 'lightweight'
+    'GPT-5.3-Codex' = 'powerful'
+    'GPT-5.6 Luna' = 'lightweight'
+    'GPT-5.6 Sol' = 'powerful'
+    'GPT-5.6 Terra' = 'versatile'
+    'Grok 4.6' = 'versatile'
+    'MAI-Code-1.1-Flash' = 'lightweight'
+}
 
 # The last-resort roster for a fully unattended run with no models given and nothing installed.
 $DefaultModels = @('GPT-5.6 Sol', 'Claude Opus 5')
 
-# Shown next to the recommended set so a stale rule is visible rather than silently trusted.
-$RecommendationDate = 'August 10, 2026'
+# Shown next to the recommended set so stale rules and fallback metadata are visible rather than
+# silently trusted. Update this only after running the live maintainer recommendation review.
+$RecommendationDate = 'September 2, 2026'
 
 # Position in this list determines each expert's primary lens, so parallel workers never overlap.
 # The Focus entries are pasted verbatim into the generated expert agent, which is what actually
@@ -1911,6 +1933,41 @@ function ConvertFrom-ModelCacheJson
     return @($ParsedValue)
 }
 
+# Sort-Object uses different culture-aware ordering behavior across the supported PowerShell
+# editions. In the live catalog, 5.1 placed MAI-Code-1.1-Flash before MAI-Code-1-Flash while 7 did
+# the reverse, which changed menu positions and made one reviewed snapshot contradict the other.
+# Names are unique before this helper is called, so a dictionary can safely reconnect the records
+# after the string keys are sorted with one explicit case-insensitive ordinal comparer.
+function ConvertTo-OrdinalModelRecord
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]
+        $Record
+    )
+
+    $RecordByName = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+
+    foreach ($Item in $Record)
+    {
+        $RecordByName[[string]$Item.Name] = $Item
+    }
+
+    [string[]]$Names = @($RecordByName.Keys)
+    [Array]::Sort($Names, [System.StringComparer]::OrdinalIgnoreCase)
+
+    $Sorted = New-Object System.Collections.Generic.List[object]
+
+    foreach ($Name in $Names)
+    {
+        $Sorted.Add($RecordByName[$Name])
+    }
+
+    return $Sorted.ToArray()
+}
+
 # Reads the cached model list out of one VS Code state database and returns a Name plus Category
 # record for every model that is user-selectable and supports agent mode.
 #
@@ -2054,7 +2111,7 @@ function Get-CachedModelRecord
 
                         if ($Records.Count -gt 0)
                         {
-                            return [PSCustomObject]@{ Succeeded = $true; Records = @($Records | Sort-Object -Property 'Name') }
+                            return [PSCustomObject]@{ Succeeded = $true; Records = @(ConvertTo-OrdinalModelRecord -Record $Records.ToArray()) }
                         }
                     }
                 }
@@ -2612,7 +2669,7 @@ function Select-ModelList
 
         if ($Discovered)
         {
-            Write-Host 'Models available to your GitHub Copilot account:'
+            Write-Host 'Agent-capable models in this VS Code profile''s cache:'
         }
         else
         {
@@ -2631,7 +2688,8 @@ function Select-ModelList
         {
             Write-Host '    [R] Use the recommended set marked with *'
             Write-Host ''
-            Write-Host ('Recommended as of {0}: {1}' -f $RecommendationDate, ($Recommended -join ', '))
+            Write-Host ('Recommendation rules reviewed {0}. Best set from this catalog: {1}' -f $RecommendationDate, ($Recommended -join ', '))
+            Write-Host 'The stars are recalculated from this profile each run; they are not a fixed global model list.'
             Write-Host 'Detected from this catalog by taking the newest model per vendor that VS Code publishes as'
             Write-Host 'powerful or versatile, because a peer review is only independent across vendors.'
         }
@@ -5291,6 +5349,15 @@ else
     else
     {
         $Catalog = $DefaultModelCatalog
+
+        foreach ($ModelName in $DefaultModelCatalog)
+        {
+            if ($DefaultModelCategoryMap.ContainsKey($ModelName))
+            {
+                $ModelCategoryMap[$ModelName] = $DefaultModelCategoryMap[$ModelName]
+            }
+        }
+
         Write-Console 'Could not read the VS Code model cache. Falling back to the built-in model list.' -Level 'Warning'
     }
 

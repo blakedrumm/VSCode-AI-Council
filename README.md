@@ -162,6 +162,23 @@ This constrains what the installer writes and nothing else. It is user-supplied 
 
 A maintainer tool, report-only, and not a switch on the installer. It reports model identifiers referenced outside the registry, matching only names the registry already knows so ordinary English does not flood the output. Add `-FailOnFinding` for CI, `-IncludeChangelog` to include history, and `-ApplyAliases` to rewrite recorded renames after taking a backup.
 
+Before every maintainer push, refresh the recommendation review from the designated high-access
+VS Code profile, inspect the resulting diff, and commit it with the rest of the change:
+
+```powershell
+.\.github\scripts\Update-ModelRecommendation.ps1 -Update
+.\.github\scripts\Update-ModelRecommendation.ps1
+```
+
+The first command updates the dated reference snapshot, the built-in fallback review stamp, and the
+README example. The second is a read-only gate: it fails if the live cache, checked-in snapshot,
+installer date, or README example disagree, or if the review was not performed that day. CI cannot
+perform the live half because a GitHub runner has no maintainer VS Code profile, but the Pester suite
+recomputes the checked-in snapshot and confirms that all three tracked representations agree.
+If the reference catalog genuinely shrank, `-Update` refuses to overwrite it until the maintainer
+confirms the loss and adds `-AllowReferenceContraction`; this keeps a lower-access or stale profile
+from silently becoming the public high-access reference.
+
 ### Known limitations
 
 - Discovery reads a local VS Code cache. It is not a Copilot API, it reflects one profile on one machine, and it can be stale.
@@ -170,19 +187,24 @@ A maintainer tool, report-only, and not a switch on the installer. It reports mo
 
 ## Model selection
 
-The installer reads the model list out of the VS Code model cache, so the picker offers the agent-capable models that cache lists for your profile. That is a local cache rather than an entitlement check, so it can be stale and it cannot confirm what your account, plan, or administrator allows.
+The installer reads the model list out of the VS Code model cache, so the picker offers the agent-capable models that cache lists for your profile. That is a local cache rather than an entitlement check, so it can be stale and it cannot confirm what your account, plan, or administrator allows. The recommendation is recalculated from that profile every time: a profile with fewer models gets the strongest eligible set it can see, while a profile whose cache exposes newer frontier models has those models considered automatically.
 
-It also marks a recommended set:
+For reference, this is the result from one high-access profile. It is evidence that the frontier path
+was checked, not a promise that every account sees the same catalog:
 
-```
+<!-- model-recommendation-review:start -->
+_Reference example reviewed **September 2, 2026** against one high-access VS Code profile._
+
+```text
   * [6] Claude Opus 5
-  * [9] Gemini 3.1 Pro (Preview)
+  * [11] Gemini 3.7 Flash
   * [13] GPT-5.3-Codex
   * [18] GPT-5.6 Sol
-  * [20] Grok 4.5
+  * [22] Grok 4.6
     [C] Enter a custom model name
     [R] Use the recommended set marked with *
 ```
+<!-- model-recommendation-review:end -->
 
 The recommendation takes the newest model from each vendor that VS Code publishes as `powerful` or `versatile`. Vendor diversity comes first because a peer review is only independent across training lineages. Models VS Code publishes as `lightweight` are excluded, since a weak entry weakens both its expert seat and its reviewer seat.
 

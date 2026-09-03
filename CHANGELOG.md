@@ -24,6 +24,12 @@ edit a global VS Code setting by hand. Uninstall is now a supported operation.
   and the install-time stale sweep still refuses to classify the coordinator as a worker.
 - Uninstall keeps a copy of every file it removes, in the same `v5_<timestamp>` backup folder an
   install uses, so the existing ten-run retention prunes them normally.
+- `Update-ModelRecommendation.ps1` runs the shipping discovery and ranking code against a
+  maintainer's live VS Code cache. It refreshes a checked-in high-access reference with `-Update`
+  and acts as a read-only pre-push gate without it, so the recommendation review cannot silently
+  carry an old date or an obsolete README example into the next push. It refuses to replace the
+  reference when the catalog shrank or a previously recommended model disappeared unless the
+  maintainer explicitly confirms the contraction.
 
 ### Changed
 
@@ -41,6 +47,21 @@ edit a global VS Code setting by hand. Uninstall is now a supported operation.
   location, rather than deleting files somewhere the user did not ask for. Installing through a
   deliberate link is still supported.
 - `-WhatIf` is rejected on an install rather than accepted and ignored.
+- The recommendation rules and fallback catalog were reviewed again on September 2 against a
+  24-model high-access profile. The reference set is now Claude Opus 5, GPT-5.6 Sol,
+  GPT-5.3-Codex, Gemini 3.7 Flash, and Grok 4.6. The stars remain profile-specific and are
+  recalculated from each user's own cache, so this reference never becomes a global allowlist.
+- The built-in fallback now carries the VS Code size categories from that review and includes the
+  newer Gemini 3.7 Flash, GPT-5.3-Codex, and Grok 4.6 entries. Losing the cache no longer makes the
+  name-based fallback misclassify Gemini 3.7 Flash as lightweight merely because its name says
+  Flash.
+- The picker now calls the discovered list a profile cache rather than claiming it proves account
+  entitlement, and says explicitly that the dated stamp applies to the recommendation rules while
+  the stars are recomputed for the current profile on every run.
+- Model names are now ordered with an explicit case-insensitive ordinal comparer. Windows PowerShell 5.1 put
+  `MAI-Code-1.1-Flash` before `MAI-Code-1-Flash` while PowerShell 7 did the reverse, so the same
+  cache produced different menu positions and could not share one reviewed recommendation
+  snapshot across the two supported hosts.
 
 ### Fixed
 
