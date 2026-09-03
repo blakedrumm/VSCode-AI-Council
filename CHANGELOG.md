@@ -26,10 +26,14 @@ edit a global VS Code setting by hand. Uninstall is now a supported operation.
   install uses, so the existing ten-run retention prunes them normally.
 - `Update-ModelRecommendation.ps1` runs the shipping discovery and ranking code against a
   maintainer's live VS Code cache. It refreshes a checked-in high-access reference with `-Update`
-  and acts as a read-only pre-push gate without it, so the recommendation review cannot silently
-  carry an old date or an obsolete README example into the next push. It refuses to replace the
-  reference when the catalog shrank or a previously recommended model disappeared unless the
-  maintainer explicitly confirms the contraction.
+  and acts as a read-only pre-push gate without it, so an obsolete recommendation or README example
+  cannot reach the next push. The gate fails on disagreement with the live cache rather than on the
+  calendar, because re-deriving the same result is what proves it current; a later run against an
+  unchanged catalog passes and writes nothing, so a push never carries a commit whose only content
+  is a new date. The recorded date marks when the result last changed, and the installer's
+  `Last Modified` release metadata moves only when the recommendation itself does. It refuses to
+  replace the reference when the catalog shrank or a previously recommended model disappeared
+  unless the maintainer explicitly confirms the contraction.
 
 ### Changed
 

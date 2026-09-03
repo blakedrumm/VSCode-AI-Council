@@ -170,14 +170,20 @@ VS Code profile, inspect the resulting diff, and commit it with the rest of the 
 .\.github\scripts\Update-ModelRecommendation.ps1
 ```
 
-The first command updates the dated reference snapshot, the built-in fallback review stamp, and the
-README example. The second is a read-only gate: it fails if the live cache, checked-in snapshot,
-installer date, or README example disagree, or if the review was not performed that day. CI cannot
-perform the live half because a GitHub runner has no maintainer VS Code profile, but the Pester suite
-recomputes the checked-in snapshot and confirms that all three tracked representations agree.
-If the reference catalog genuinely shrank, `-Update` refuses to overwrite it until the maintainer
-confirms the loss and adds `-AllowReferenceContraction`; this keeps a lower-access or stale profile
-from silently becoming the public high-access reference.
+The first command refreshes the dated reference snapshot, the installer review date, and the README
+example, but only when the recommendation actually changed. The second is a read-only gate: it fails
+when the live cache, the checked-in snapshot, the installer date, or the README example disagree.
+
+Agreement with the live cache is what proves the recommendation current, so the gate does not demand
+a same-day stamp. Re-running on a later day re-derives the recommendation from scratch and passes if
+nothing changed, which keeps a push from producing a commit whose only content is a new date. The
+stamp therefore records when the result last changed rather than when someone last ran the check.
+
+CI cannot perform the live half because a GitHub runner has no maintainer VS Code profile, but the
+Pester suite recomputes the checked-in snapshot and confirms that all three tracked representations
+agree. If the reference catalog genuinely shrank, `-Update` refuses to overwrite it until the
+maintainer confirms the loss and adds `-AllowReferenceContraction`; this keeps a lower-access or
+stale profile from silently becoming the public high-access reference.
 
 ### Known limitations
 

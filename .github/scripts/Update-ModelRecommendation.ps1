@@ -7,23 +7,29 @@
     Runs the installer's shipping model discovery and recommendation functions against this
     machine's live VS Code cache. It installs nothing and does not change VS Code settings.
 
-    Without -Update, this is a read-only pre-push gate. It requires the checked-in reference to
-    match the live cache, the installer and README to match that reference, and the review date to
-    be today. This makes every maintainer push prove that the recommendation was checked again.
+    Without -Update, this is a read-only pre-push gate. Every run re-derives the recommendation from
+    the live cache, so a push is blocked when the checked-in reference, the installer, or the README
+    disagrees with what this profile actually offers today.
 
-    With -Update, it refreshes .github/model-recommendation-review.json, the installer review and
-    last-modified dates, and the marked README example. Run it only from the designated high-access
-    profile. Other users can have smaller catalogs, and their result must not replace the reference.
+    The gate deliberately does not require the stamped date to be today. Agreement with the live
+    cache is what proves the recommendation current; the date only records when the result last
+    changed. Re-running on a later day therefore re-verifies the same finding and passes.
+
+    With -Update, it refreshes .github/model-recommendation-review.json, the installer review date,
+    and the marked README example, but only when the recommendation actually changed. Run it only
+    from the designated high-access profile. Other users can have smaller catalogs, and their result
+    must not replace the reference.
 
 .PARAMETER Path
     Repository root. Defaults to the repository containing this script.
 
 .PARAMETER ReviewDate
-    Date to record or require. Defaults to today. Primarily useful for deterministic maintenance.
+    Date recorded when the recommendation changed. Defaults to today. An unchanged recommendation
+    keeps the date already on record rather than being restamped.
 
 .PARAMETER Update
-    Write the live review into the three tracked representations. Without this switch nothing is
-    written.
+    Write the live review into the tracked representations, if and only if the recommendation
+    changed. Without this switch nothing is written.
 
 .PARAMETER AllowReferenceContraction
     With -Update, explicitly permits a smaller catalog or the disappearance of a previously
@@ -231,19 +237,36 @@ if ($Records.Count -eq 0)
     throw 'No agent-capable model records were read from the VS Code cache. Nothing was updated or verified.'
 }
 
-if ($Update -and (Test-Path -LiteralPath $ReviewPath -PathType Leaf))
+$ExistingReview = $null
+$ExistingReviewJson = $null
+$ExistingReviewProblem = $null
+
+if (Test-Path -LiteralPath $ReviewPath -PathType Leaf)
 {
     try
     {
-        $PreviousReview = [System.IO.File]::ReadAllText($ReviewPath) | ConvertFrom-Json
+        $ExistingReviewJson = [System.IO.File]::ReadAllText($ReviewPath)
+        $ExistingReview = $ExistingReviewJson | ConvertFrom-Json
     }
     catch
     {
-        throw "The existing recommendation review cannot be parsed, so it will not be overwritten: $($_.Exception.Message)"
-    }
+        if ($Update)
+        {
+            throw "The existing recommendation review cannot be parsed, so it will not be overwritten: $($_.Exception.Message)"
+        }
 
-    $PreviousCatalog = @($PreviousReview.catalog)
-    $PreviousRecommended = @($PreviousReview.recommended)
+        $ExistingReviewProblem = "the checked-in review could not be read: $($_.Exception.Message)"
+    }
+}
+else
+{
+    $ExistingReviewProblem = 'the checked-in review file is missing'
+}
+
+if ($Update -and $null -ne $ExistingReview)
+{
+    $PreviousCatalog = @(Get-PropertyValue -InputObject $ExistingReview -Name 'catalog')
+    $PreviousRecommended = @(Get-PropertyValue -InputObject $ExistingReview -Name 'recommended')
     $CurrentNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($Record in $Records) { [void]$CurrentNames.Add($Record.Name) }
 
@@ -315,8 +338,50 @@ if (($FallbackRecommendation -join "`n") -cne ($Recommended -join "`n"))
     throw "The built-in fallback recommends '$($FallbackRecommendation -join ', ')' instead of the reviewed live set '$($Recommended -join ', ')'. Update it deliberately before continuing."
 }
 
-$IsoDate = $ReviewDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
-$DisplayDate = $ReviewDate.ToString('MMMM d, yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+$LiveCatalogRows = @($Records | ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.Category, [bool]$_.IsPreview })
+$ExistingCatalogRows = @()
+$ExistingRecommended = @()
+$ExistingReviewDate = $null
+
+if ($null -ne $ExistingReview)
+{
+    # Read through Get-PropertyValue rather than dot notation: this file is hand-editable, and a
+    # missing key would otherwise throw a raw property error instead of a reportable problem.
+    $ExistingCatalogRows = @(@(Get-PropertyValue -InputObject $ExistingReview -Name 'catalog') |
+            Where-Object { $null -ne $_ } |
+            ForEach-Object {
+                '{0}|{1}|{2}' -f (Get-PropertyValue -InputObject $_ -Name 'name'),
+                    (Get-PropertyValue -InputObject $_ -Name 'category'),
+                    [bool](Get-PropertyValue -InputObject $_ -Name 'isPreview')
+            })
+    $ExistingRecommended = @(@(Get-PropertyValue -InputObject $ExistingReview -Name 'recommended') |
+            Where-Object { $null -ne $_ })
+
+    $ParsedExistingDate = [datetime]::MinValue
+
+    if ([datetime]::TryParseExact(
+            [string](Get-PropertyValue -InputObject $ExistingReview -Name 'reviewedOn'),
+            'yyyy-MM-dd',
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::None,
+            [ref]$ParsedExistingDate))
+    {
+        $ExistingReviewDate = $ParsedExistingDate
+    }
+}
+
+$RecommendationChanged = $null -eq $ExistingReview -or
+    $null -eq $ExistingReviewDate -or
+    ($ExistingCatalogRows -join "`n") -cne ($LiveCatalogRows -join "`n") -or
+    ($ExistingRecommended -join "`n") -cne ($Recommended -join "`n")
+
+# The stamp records when the result last changed, not when someone last ran this. Re-running on a
+# later day against an identical catalog re-proves the same finding, so keep the date on record
+# instead of rewriting three files to say exactly what they already said.
+$EffectiveReviewDate = if ($RecommendationChanged) { $ReviewDate } else { $ExistingReviewDate }
+
+$IsoDate = $EffectiveReviewDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+$DisplayDate = $EffectiveReviewDate.ToString('MMMM d, yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
 $OrdinalDate = Get-OrdinalDateText -Date $ReviewDate
 
 $Review = [ordered]@{
@@ -360,13 +425,20 @@ if ([regex]::Matches($UpdatedInstaller, $LastModifiedPattern).Count -ne 1)
     throw 'The installer does not contain exactly one Last Modified entry.'
 }
 
-$UpdatedInstaller = [regex]::Replace(
-    $UpdatedInstaller,
-    $LastModifiedPattern,
-    [System.Text.RegularExpressions.MatchEvaluator]{
-        param ($Match)
-        return $Match.Groups['Label'].Value + '        ' + $OrdinalDate + $Match.Groups['Ending'].Value
-    })
+# Last Modified is release metadata, not a review stamp, so the gate never compares it and only a
+# run that actually rewrites the recommendation moves it.
+$InstallerToWrite = $UpdatedInstaller
+
+if ($RecommendationChanged)
+{
+    $InstallerToWrite = [regex]::Replace(
+        $UpdatedInstaller,
+        $LastModifiedPattern,
+        [System.Text.RegularExpressions.MatchEvaluator]{
+            param ($Match)
+            return $Match.Groups['Label'].Value + '        ' + $OrdinalDate + $Match.Groups['Ending'].Value
+        })
+}
 
 $ReadmeText = [System.IO.File]::ReadAllText($ReadmePath)
 $ReadmeNewLine = if ($ReadmeText.Contains("`r`n")) { "`r`n" } else { "`n" }
@@ -410,19 +482,32 @@ $UpdatedReadme = [regex]::Replace(
 
 Write-Output ''
 Write-Output "Live agent-capable catalog: $($Records.Count) models"
-Write-Output "Recommendation review date: $DisplayDate"
+Write-Output "Recommendation reviewed on: $DisplayDate"
 Write-Output 'Recommended set:'
 foreach ($Name in $Recommended) { Write-Output "  $Name" }
 
 if ($Update)
 {
-    if ($PSCmdlet.ShouldProcess($RepositoryRoot, 'Refresh the tracked model recommendation review'))
+    $PendingChanges = New-Object System.Collections.Generic.List[string]
+
+    if ($InstallerText -cne $InstallerToWrite) { $PendingChanges.Add('installer') }
+    if ($ReadmeText -cne $UpdatedReadme) { $PendingChanges.Add('README example') }
+    if ($null -eq $ExistingReviewJson -or $ExistingReviewJson -cne $ReviewJson) { $PendingChanges.Add('review snapshot') }
+
+    if ($PendingChanges.Count -eq 0)
     {
-        Set-Utf8FileContent -LiteralPath $InstallerPath -Content $UpdatedInstaller
+        Write-Output ''
+        Write-Output "Nothing to write. The live catalog still matches the review dated $DisplayDate."
+        return
+    }
+
+    if ($PSCmdlet.ShouldProcess($RepositoryRoot, "Refresh the model recommendation review ($($PendingChanges -join ', '))"))
+    {
+        Set-Utf8FileContent -LiteralPath $InstallerPath -Content $InstallerToWrite
         Set-Utf8FileContent -LiteralPath $ReadmePath -Content $UpdatedReadme
         Set-Utf8FileContent -LiteralPath $ReviewPath -Content $ReviewJson
         Write-Output ''
-        Write-Output 'Updated the installer dates, README example, and checked-in recommendation review.'
+        Write-Output "Updated: $($PendingChanges -join ', ')."
     }
 
     return
@@ -430,51 +515,36 @@ if ($Update)
 
 $Problems = New-Object System.Collections.Generic.List[string]
 
-if (-not (Test-Path -LiteralPath $ReviewPath -PathType Leaf))
+if ($null -ne $ExistingReviewProblem)
 {
-    $Problems.Add('the checked-in review file is missing')
+    $Problems.Add($ExistingReviewProblem)
 }
 else
 {
-    try
+    if ($null -eq $ExistingReviewDate)
     {
-        $ExistingReview = [System.IO.File]::ReadAllText($ReviewPath) | ConvertFrom-Json
-        $ExistingCatalog = @($ExistingReview.catalog | ForEach-Object {
-                '{0}|{1}|{2}' -f $_.name, $_.category, [bool]$_.isPreview
-            })
-        $LiveCatalog = @($Records | ForEach-Object {
-                '{0}|{1}|{2}' -f $_.Name, $_.Category, [bool]$_.IsPreview
-            })
-
-        if ($ExistingReview.reviewedOn -cne $IsoDate)
-        {
-            $Problems.Add("the checked-in review date is '$($ExistingReview.reviewedOn)', not '$IsoDate'")
-        }
-
-        if (($ExistingCatalog -join "`n") -cne ($LiveCatalog -join "`n"))
-        {
-            $Problems.Add('the live profile catalog differs from the checked-in review')
-        }
-
-        if ((@($ExistingReview.recommended) -join "`n") -cne ($Recommended -join "`n"))
-        {
-            $Problems.Add('the checked-in recommended set differs from the shipping algorithm result')
-        }
+        $Problems.Add('the checked-in review has no usable yyyy-MM-dd reviewedOn date')
     }
-    catch
+
+    if (($ExistingCatalogRows -join "`n") -cne ($LiveCatalogRows -join "`n"))
     {
-        $Problems.Add("the checked-in review could not be read: $($_.Exception.Message)")
+        $Problems.Add('the live profile catalog differs from the checked-in review')
+    }
+
+    if (($ExistingRecommended -join "`n") -cne ($Recommended -join "`n"))
+    {
+        $Problems.Add('the checked-in recommended set differs from the shipping algorithm result')
     }
 }
 
 if ($InstallerText -cne $UpdatedInstaller)
 {
-    $Problems.Add('the installer recommendation or Last Modified date is stale')
+    $Problems.Add('the installer RecommendationDate does not match the checked-in review')
 }
 
 if ($ReadmeText -cne $UpdatedReadme)
 {
-    $Problems.Add('the README recommendation example or date is stale')
+    $Problems.Add('the README recommendation example does not match the checked-in review')
 }
 
 if ($Problems.Count -gt 0)
@@ -485,3 +555,10 @@ if ($Problems.Count -gt 0)
 
 Write-Output ''
 Write-Output 'Model recommendation review passed. The live cache and all tracked representations agree.'
+
+$VerifiedOn = $ReviewDate.ToString('MMMM d, yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+
+if ($EffectiveReviewDate -lt $ReviewDate)
+{
+    Write-Output "Re-verified against the live cache on $VerifiedOn. Unchanged since $DisplayDate, so no restamp is needed."
+}
