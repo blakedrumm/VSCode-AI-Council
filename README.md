@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.17.0-blue" alt="Version 5.17.0">
+  <img src="https://img.shields.io/badge/version-5.18.0-blue" alt="Version 5.18.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -260,11 +260,11 @@ It reads the latest release tag from GitHub's release metadata. It never downloa
 
 | Change | Where | Reversible |
 |---|---|---|
-| Agent files | `~/.copilot/agents` or `<workspace>/.github/agents` | Yes, delete the `mm-*.agent.md` and coordinator files |
-| One VS Code setting | `chat.subagents.allowInvocationsFromSubagents = true` | Yes, and `-SkipVSCodeSetting` prevents it |
-| Backups | `~/.copilot/agent-backups/v5_<timestamp>` | Every file it overwrites is copied here first, and only the newest ten runs are kept |
+| Agent files | `~/.copilot/agents` or `<workspace>/.github/agents` | Yes, run `-Uninstall` |
+| One VS Code setting | `chat.subagents.allowInvocationsFromSubagents = true` | Yes, by hand, and `-SkipVSCodeSetting` prevents it |
+| Backups | `~/.copilot/agent-backups/v5_<timestamp>` | Every file it overwrites or removes is copied here first, and only the newest ten runs are kept |
 
-That setting is global. It enables nested subagents for every agent you use, not only this council.
+That setting is global. It enables nested subagents for every agent you use, not only this council. `-Uninstall` does not turn it back off, because the installer never recorded whether it was the one that turned it on.
 
 The installer does **not** enable global tool auto-approval, and does **not** enable unrestricted recursive agents.
 
@@ -275,12 +275,25 @@ The repository's Pester suite runs the same behavioral checks on PowerShell 7 an
 ## Uninstall
 
 ```powershell
-Remove-Item "$HOME\.copilot\agents\multi-model-engineering-council.agent.md"
-Remove-Item "$HOME\.copilot\agents\mm-expert-*.agent.md"
-Remove-Item "$HOME\.copilot\agents\mm-reviewer-*.agent.md"
+.\Install-VSCodeCopilotCouncil-v5.ps1 -Uninstall
 ```
 
-Then set `chat.subagents.allowInvocationsFromSubagents` back to `false` if you want it off, and reload the window.
+Add `-WhatIf` to see exactly what it would remove without removing anything. Add `-Force` to skip the confirmation prompt.
+
+To remove a council installed into one repository:
+
+```powershell
+.\Install-VSCodeCopilotCouncil-v5.ps1 -Uninstall -Scope Workspace -WorkspacePath 'C:\GitHub\MyProject'
+```
+
+It lists every file before deleting anything, and removes only files whose front matter identifies them as this installer's, so a hand-written agent that happens to match the naming pattern is left alone. A copy of everything it removes goes to `~/.copilot/agent-backups/v5_<timestamp>` first. Running it twice is harmless, and running it when nothing is installed is a success rather than an error.
+
+Two things are deliberately left behind:
+
+- **Your earlier backups**, under `~/.copilot/agent-backups`. Uninstall is not a reason to destroy your recovery history.
+- **The `chat.subagents.allowInvocationsFromSubagents` setting.** The installer never recorded whether it turned that on or found it already on, so it will not guess and silently break another agent that relies on it. Set it to `false` by hand if you want it off, then reload the window.
+
+A council installed in a repository lives in that repository. A user-scope uninstall does not reach it, which is why the command above takes the path explicitly rather than searching your disk for installations.
 
 ## Cost
 

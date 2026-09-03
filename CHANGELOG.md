@@ -5,6 +5,53 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.18.0
+
+The council could be installed but never removed. The README offered three `Remove-Item` globs that
+only covered a user-scope install, missed the coordinator's own removal rules, and told people to
+edit a global VS Code setting by hand. Uninstall is now a supported operation.
+
+### Added
+
+- `-Uninstall` removes the agent files this installer wrote and then exits without installing
+  anything. It honours `-Scope` and `-WorkspacePath` exactly as an install does, supports `-WhatIf`
+  to preview the removal, and `-Force` to skip the confirmation prompt. Every candidate is listed
+  before anything is deleted, because the realistic mistake here is pointing it at the wrong
+  directory rather than anything going wrong inside the removal.
+- `Test-OwnedAgentFile` gained a coordinator parameter set. The worker test requires
+  `user-invocable: false` and an Expert or Reviewer name, which the coordinator is not and does not
+  have, so nothing could previously prove the coordinator was ours. The worker path is unchanged,
+  and the install-time stale sweep still refuses to classify the coordinator as a worker.
+- Uninstall keeps a copy of every file it removes, in the same `v5_<timestamp>` backup folder an
+  install uses, so the existing ten-run retention prunes them normally.
+
+### Changed
+
+- Install and uninstall now resolve the agent directory through one function, so the directory a
+  removal sweeps can never drift from the one an install wrote to.
+- Uninstall deliberately leaves two things alone: earlier backups, and the global
+  `chat.subagents.allowInvocationsFromSubagents` setting. The installer never recorded whether it
+  enabled that setting or found it already enabled, so turning it off could silently break another
+  agent that depends on it. The summary says so and gives the manual step.
+- Removal is driven by what is on disk rather than by the roster recorded in the coordinator. Two
+  different model names can produce the same file-name slug, and the installer disambiguates the
+  second with a numeric suffix the roster does not record, so a roster-driven sweep would leave
+  that file behind permanently.
+- A link anywhere above the agent directory now refuses the whole uninstall and names the real
+  location, rather than deleting files somewhere the user did not ask for. Installing through a
+  deliberate link is still supported.
+- `-WhatIf` is rejected on an install rather than accepted and ignored.
+
+### Fixed
+
+- Removal reports what actually happened rather than what was attempted. A file that cannot be read
+  because an editor is holding it open is now reported as a locked file with a remedy, instead of
+  being reported as "not this installer's", which sent users looking for the wrong problem. A file
+  is confirmed gone from disk before the summary claims it was removed.
+- One locked file no longer prevents the rest of the council from being removed. Refusing the whole
+  operation would leave every agent installed and loading, which is the state the user asked to
+  leave, and VS Code holding a file open is the ordinary case rather than an exceptional one.
+
 ## 5.17.0
 
 A multi-model review of the installer turned up defects that every automated check had passed over,

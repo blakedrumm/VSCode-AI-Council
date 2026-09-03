@@ -172,6 +172,22 @@
     Opens the installed coordinator agent file and the VS Code settings file after
     installation when a standard VS Code installation and its CLI are detected.
 
+.PARAMETER Uninstall
+    Removes the council agent files this script installed, then exits without installing anything.
+
+    Only files whose front matter identifies them as this installer's are deleted, so a hand-written
+    agent that happens to match the naming pattern is left alone. A copy of every removed file is
+    kept under the same backup folder an install uses.
+
+    Uninstall never changes your VS Code settings. The installer does not record whether it enabled
+    chat.subagents.allowInvocationsFromSubagents or found it already enabled, so it will not guess.
+
+    -Scope and -WorkspacePath select what to remove, exactly as they select where to install.
+    Supports -WhatIf to preview the removal and -Force to skip the confirmation prompt.
+
+.PARAMETER Force
+    Skips the confirmation prompt shown before -Uninstall removes anything.
+
 .EXAMPLE
     .\Install-VSCodeCopilotCouncil-v5.ps1
 
@@ -192,6 +208,17 @@
         -WorkspacePath 'C:\GitHub\MyProject' `
         -NonInteractive
 
+.EXAMPLE
+    .\Install-VSCodeCopilotCouncil-v5.ps1 -Uninstall -WhatIf
+
+    Lists what a user-scope uninstall would remove, without removing anything.
+
+.EXAMPLE
+    .\Install-VSCodeCopilotCouncil-v5.ps1 `
+        -Uninstall `
+        -Scope Workspace `
+        -WorkspacePath 'C:\GitHub\MyProject'
+
 .NOTES
     Author:
         Blake Drumm (blakedrumm@microsoft.com)
@@ -200,10 +227,10 @@
         August 6th, 2026
 
     Last Modified:
-        August 31st, 2026
+        September 2nd, 2026
 
     Version:
-        5.17.0
+        5.18.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -245,7 +272,9 @@
         SOFTWARE.
 #>
 
-[CmdletBinding()]
+# SupportsShouldProcess exists for -Uninstall, which is the only destructive path. The install
+# flow rejects -WhatIf outright rather than accepting it and installing anyway.
+[CmdletBinding(SupportsShouldProcess = $true)]
 param
 (
     [Parameter()]
@@ -295,7 +324,16 @@ param
 
     [Parameter()]
     [switch]
-    $OpenInVSCode
+    $OpenInVSCode,
+
+    # Removes the agent files this installer owns and then returns. No model machinery runs.
+    [Parameter()]
+    [switch]
+    $Uninstall,
+
+    [Parameter()]
+    [switch]
+    $Force
 )
 
 Set-StrictMode -Version Latest
@@ -315,9 +353,11 @@ $ErrorActionPreference = 'Stop'
 #   9. Interactive prompts     The model picker and the coordinator picker.
 #  10. VS Code settings        A comment-preserving edit of the user's settings.json.
 #  11. Agent content           Builds the markdown body of every agent file.
-#  12. Install and validate    Writes the agent files, then re-reads them to prove they are sane.
+#  12. Install and validate    Writes the agent files, then re-reads them to prove they are sane,
+#                             and removes the ones it owns when -Uninstall is used.
 #  13. Environment detection   Finds VS Code and the Copilot extensions.
-#  14. Installation            The top-level flow. This is where execution actually begins.
+#  14. Installation            The top-level flow. This is where execution actually begins, and
+#                              where -Uninstall branches off and returns before any model work.
 #
 # Sections 1 through 13 only define constants and functions. Nothing happens until section 14.
 # =============================================================================================
@@ -381,7 +421,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.17.0'
+$ScriptVersion = '5.18.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
@@ -643,7 +683,12 @@ function Initialize-InstallProgress
     (
         [Parameter(Mandatory = $true)]
         [string[]]
-        $StepNames
+        $StepNames,
+
+        # Uninstall reuses this counter, so the caption cannot be hardcoded to installing.
+        [Parameter()]
+        [string]
+        $Activity = 'Installing adaptive multi-model Copilot council'
     )
 
     $UseProgressBar = $false
@@ -666,7 +711,7 @@ function Initialize-InstallProgress
         Index = 0
         Timer = $null
         UseProgressBar = $UseProgressBar
-        Activity = 'Installing adaptive multi-model Copilot council'
+        Activity = $Activity
     }
 
     Write-Verbose ('Planned steps: {0}' -f ($StepNames -join ' | '))
@@ -4205,11 +4250,20 @@ function Install-AgentFile
 # front matter is inspected: the body is prose that may legitimately quote front-matter syntax.
 function Test-OwnedAgentFile
 {
+    [CmdletBinding(DefaultParameterSetName = 'Worker')]
+    [OutputType([bool])]
     param
     (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Worker')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Coordinator')]
         [string]
-        $Path
+        $Path,
+
+        # The coordinator carries the opposite invocability flags from a worker, so proving it is
+        # ours needs its own front-matter shape rather than a loosened worker test.
+        [Parameter(Mandatory = $true, ParameterSetName = 'Coordinator')]
+        [string]
+        $CoordinatorName
     )
 
     try
@@ -4230,9 +4284,218 @@ function Test-OwnedAgentFile
 
     $FrontMatter = $FrontMatterMatch.Groups[1].Value
 
+    if ($PSCmdlet.ParameterSetName -eq 'Coordinator')
+    {
+        # Deliberately does not require disable-model-invocation. Older installs predate it, and
+        # uninstall has to be able to remove a council this script wrote in an earlier version.
+        return $FrontMatter -match '(?m)^target: vscode\r?$' -and
+            $FrontMatter -match '(?m)^user-invocable: true\r?$' -and
+            $FrontMatter -match ('(?m)^name: {0}\r?$' -f [regex]::Escape($CoordinatorName))
+    }
+
     return $FrontMatter -match '(?m)^target: vscode\r?$' -and
         $FrontMatter -match '(?m)^user-invocable: false\r?$' -and
         $FrontMatter -match '(?m)^name: .+ (Expert|Reviewer)\r?$'
+}
+
+# Resolves the directory the agents live in, and refuses path forms that resolve against ambient
+# state instead of naming a fixed location. Install and uninstall both call this, so the directory
+# a sweep targets can never drift from the one an install wrote to.
+function Resolve-CouncilAgentDirectory
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'Workspace')]
+        [string]
+        $Scope,
+
+        [Parameter()]
+        [string]
+        $WorkspacePath
+    )
+
+    if ($Scope -ne 'Workspace')
+    {
+        return (Join-Path -Path $HOME -ChildPath '.copilot\agents')
+    }
+
+    if ([string]::IsNullOrWhiteSpace($WorkspacePath))
+    {
+        throw 'WorkspacePath must be specified when -Scope Workspace is used.'
+    }
+
+    # C:folder is drive-relative, \folder is root-relative, and \\?\ and \\.\ are device paths that
+    # bypass normalization. All three name different places depending on process state.
+    if ($WorkspacePath -match '^[A-Za-z]:[^\\/]' -or
+        $WorkspacePath -match '^[\\/](?![\\/])' -or
+        $WorkspacePath -match '^\\\\[?.]\\')
+    {
+        throw "WorkspacePath must be a full path such as C:\repo, not a drive-relative, root-relative, or device path: $WorkspacePath"
+    }
+
+    if (-not (Test-Path -LiteralPath $WorkspacePath -PathType Container))
+    {
+        throw "Workspace path is not an existing directory: $WorkspacePath"
+    }
+
+    $ResolvedWorkspacePath = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $WorkspacePath).Path)
+
+    return (Join-Path -Path $ResolvedWorkspacePath -ChildPath '.github\agents')
+}
+
+# Removes the council agent files in one directory and reports exactly what happened to each.
+#
+# Deletion is driven by what is on disk, never by the roster recorded in the coordinator. Two
+# different model names can slug to the same file name, and the installer disambiguates the second
+# with a numeric suffix the roster does not record, so a roster-driven sweep strands it forever.
+#
+# The directory is passed in rather than derived from $Scope, which keeps the destructive logic
+# callable against a sandbox. $HOME is ReadOnly and AllScope on both editions, so a test cannot
+# redirect it without a global -Force mutation that leaks into every later test in the session.
+function Remove-CouncilAgentFile
+{
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [string]
+        $AgentDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $BackupDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $CoordinatorFileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $CoordinatorAgentName
+    )
+
+    # Set locally rather than inherited. A caller running under the default 'Continue' would turn a
+    # failed copy or delete into a non-terminating error, and this function would then report a file
+    # as removed while it was still on disk.
+    $ErrorActionPreference = 'Stop'
+
+    $Result = [PSCustomObject]@{
+        Removed = New-Object System.Collections.Generic.List[string]
+        WouldRemove = New-Object System.Collections.Generic.List[string]
+        Skipped = New-Object System.Collections.Generic.List[string]
+        Failed = New-Object System.Collections.Generic.List[string]
+        Examined = 0
+    }
+
+    if (-not (Test-Path -LiteralPath $AgentDirectory -PathType Container))
+    {
+        return $Result
+    }
+
+    $CanonicalDirectory = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $AgentDirectory).Path).TrimEnd('\')
+
+    $Candidates = New-Object System.Collections.Generic.List[object]
+    $CoordinatorCandidate = $null
+
+    # Get-ChildItem -Filter is deliberately not used: it matches 8.3 short names as well as long
+    # ones, so a file could qualify under a name the pattern was never meant to accept.
+    foreach ($Item in (Get-ChildItem -LiteralPath $CanonicalDirectory -File -ErrorAction SilentlyContinue))
+    {
+        if ($Item.Name -match '^mm-(expert|reviewer)-.+\.agent\.md$')
+        {
+            $Candidates.Add($Item)
+        }
+        elseif ($Item.Name -eq $CoordinatorFileName)
+        {
+            $CoordinatorCandidate = $Item
+        }
+    }
+
+    # The coordinator goes last because it is the only file recording the roster, so for as long as
+    # anything else survives, it stays on disk as the record of what is still there.
+    if ($null -ne $CoordinatorCandidate)
+    {
+        $Candidates.Add($CoordinatorCandidate)
+    }
+
+    foreach ($Candidate in $Candidates)
+    {
+        $Result.Examined++
+
+        $CandidateParent = [System.IO.Path]::GetFullPath((Split-Path -Path $Candidate.FullName -Parent)).TrimEnd('\')
+
+        if (-not [string]::Equals($CandidateParent, $CanonicalDirectory, [System.StringComparison]::OrdinalIgnoreCase))
+        {
+            $Result.Skipped.Add(('{0} (not a direct child of the agent directory)' -f $Candidate.Name))
+            continue
+        }
+
+        # A file that cannot be read is a different problem from a file that is not ours, and the
+        # ownership test reports both as "not ours". Separating them here keeps the summary honest,
+        # because a locked file tells the user to close an editor and a foreign file does not.
+        try
+        {
+            $null = Read-Utf8File -Path $Candidate.FullName
+        }
+        catch
+        {
+            $Result.Failed.Add(('{0} (could not be read: {1})' -f $Candidate.Name, $_.Exception.Message))
+            Write-Console "Could not read $($Candidate.Name), so it was left in place. $($_.Exception.Message)" -Level 'Warning'
+            continue
+        }
+
+        $IsOwned = if ($Candidate.Name -eq $CoordinatorFileName)
+        {
+            Test-OwnedAgentFile -Path $Candidate.FullName -CoordinatorName $CoordinatorAgentName
+        }
+        else
+        {
+            Test-OwnedAgentFile -Path $Candidate.FullName
+        }
+
+        # A file this installer cannot prove it wrote is never deleted, which is the same rule the
+        # install-time stale sweep applies. This is the one failure that is never worked around.
+        if (-not $IsOwned)
+        {
+            $Result.Skipped.Add(('{0} (front matter is not this installer''s)' -f $Candidate.Name))
+            Write-Console "Left a file alone because its front matter is not this installer's, despite matching the naming pattern: $($Candidate.Name)" -Level 'Warning'
+            continue
+        }
+
+        if (-not $PSCmdlet.ShouldProcess($Candidate.FullName, 'Remove council agent file'))
+        {
+            # Recorded so a -WhatIf run can name the files it would take, which is the only reason
+            # anyone asks for a preview of a delete.
+            $Result.WouldRemove.Add($Candidate.Name)
+            continue
+        }
+
+        try
+        {
+            Backup-ExistingFile -Path $Candidate.FullName -BackupDirectory $BackupDirectory
+            Remove-Item -LiteralPath $Candidate.FullName -Force
+
+            # Proves the outcome instead of trusting that the call returned quietly, so the summary
+            # can never claim a file was removed while it is still sitting there.
+            if (Test-Path -LiteralPath $Candidate.FullName)
+            {
+                throw 'the file is still on disk after the removal call'
+            }
+
+            $Result.Removed.Add($Candidate.Name)
+            Write-Console "Removed agent file: $($Candidate.Name)"
+        }
+        catch
+        {
+            # A locked or protected file is a mechanical failure, not a question of ownership.
+            # Abandoning the rest over one would leave the council installed and still loading.
+            $Result.Failed.Add(('{0} ({1})' -f $Candidate.Name, $_.Exception.Message))
+            Write-Console "Could not remove $($Candidate.Name). $($_.Exception.Message)" -Level 'Warning'
+        }
+    }
+
+    return $Result
 }
 
 function Test-AgentFile
@@ -4665,6 +4928,213 @@ $AllowPrompts = (-not $NonInteractive) -and [Environment]::UserInteractive -and 
 $ModelsWereSupplied = ($null -ne $Models) -and (@($Models).Count -gt 0)
 $CatalogWasSupplied = ($null -ne $ModelCatalog) -and (@($ModelCatalog).Count -gt 0)
 
+# -WhatIf only means anything for -Uninstall. Accepting it on an install and then installing would
+# be the worst kind of surprise, so it is rejected instead.
+if ($WhatIfPreference -and -not $Uninstall)
+{
+    throw '-WhatIf is only supported together with -Uninstall. An install makes no changes it can preview.'
+}
+
+# ---------------------------------------------------------------------------------------------
+# Uninstall is a short flow that returns before any model machinery runs. It shares scope
+# resolution, the lock, the ownership test, and the backup helper with the installer.
+# ---------------------------------------------------------------------------------------------
+if ($Uninstall)
+{
+    $UninstallConflicts = @(
+        if ($ModelsWereSupplied) { '-Models' }
+        if ($CatalogWasSupplied) { '-ModelCatalog' }
+        if (-not [string]::IsNullOrWhiteSpace($CoordinatorModel)) { '-CoordinatorModel' }
+        if (-not [string]::IsNullOrWhiteSpace($PolicyPath)) { '-PolicyPath' }
+        if ($OpenInVSCode) { '-OpenInVSCode' }
+    )
+
+    if ($UninstallConflicts.Count -gt 0)
+    {
+        throw "-Uninstall cannot be combined with $($UninstallConflicts -join ', '). Uninstall removes the installed agent files and selects nothing."
+    }
+
+    Initialize-InstallProgress `
+    -StepNames @('Resolve install scope', 'Remove agent files') `
+    -Activity 'Removing the multi-model Copilot council'
+
+    Start-InstallStep -Name 'Resolve install scope'
+
+    $AgentDirectory = Resolve-CouncilAgentDirectory -Scope $Scope -WorkspacePath $WorkspacePath
+    Write-Console "Agent directory: $AgentDirectory"
+
+    # A link anywhere above the agent files means every delete would land somewhere the user did
+    # not name. Writing through a deliberate link is supported; deleting through one is not.
+    for ($LinkProbe = $AgentDirectory; -not [string]::IsNullOrEmpty($LinkProbe); $LinkProbe = Split-Path -Path $LinkProbe -Parent)
+    {
+        if (-not (Test-Path -LiteralPath $LinkProbe))
+        {
+            continue
+        }
+
+        $ProbeItem = Get-Item -LiteralPath $LinkProbe -Force -ErrorAction SilentlyContinue
+
+        if ($null -ne $ProbeItem -and $ProbeItem.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint))
+        {
+            throw "A link at $($ProbeItem.FullName) redirects this path, so removing files through it would delete them somewhere you did not name. Re-run with -Scope Workspace -WorkspacePath pointing at the real location, or delete the files there by hand."
+        }
+    }
+
+    Complete-InstallStep
+    Start-InstallStep -Name 'Remove agent files'
+
+    $UninstallMutex = New-Object System.Threading.Mutex($false, 'Local\VSCodeCopilotCouncilInstaller')
+    $UninstallMutexAcquired = $false
+
+    try
+    {
+        try
+        {
+            $UninstallMutexAcquired = $UninstallMutex.WaitOne(0)
+        }
+        catch [System.Threading.AbandonedMutexException]
+        {
+            $UninstallMutexAcquired = $true
+            Write-Console 'Recovered the installer lock from an interrupted earlier process.' -Level 'Warning'
+        }
+
+        if (-not $UninstallMutexAcquired)
+        {
+            throw 'A VS Code Copilot Council install or uninstall is already running. Wait for it to finish, then re-run.'
+        }
+
+        # Shown before anything is deleted, because the realistic failure here is a user pointing
+        # this at the wrong directory rather than anything going wrong inside the removal itself.
+        $PreviewNames = @(
+            if (Test-Path -LiteralPath $AgentDirectory -PathType Container)
+            {
+                Get-ChildItem -LiteralPath $AgentDirectory -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^mm-(expert|reviewer)-.+\.agent\.md$' -or $_.Name -eq $CoordinatorFileName } |
+                    ForEach-Object { $_.Name }
+            })
+
+        if ($PreviewNames.Count -eq 0)
+        {
+            Complete-InstallStep
+            Complete-InstallProgress
+            Write-Output ''
+            Write-Console 'No council agent files were found, so nothing needed removing.' -Level 'Success'
+            Write-Output ''
+            Write-Output "Looked in: $AgentDirectory"
+
+            if ($Scope -ne 'Workspace')
+            {
+                Write-Output 'A council installed into a repository lives in that repository, not here.'
+                Write-Output 'Remove one with: -Uninstall -Scope Workspace -WorkspacePath <path to the repository>'
+            }
+
+            return
+        }
+
+        Write-Console "Found $($PreviewNames.Count) council file(s) to consider in $AgentDirectory"
+
+        foreach ($PreviewName in $PreviewNames)
+        {
+            Write-Console $PreviewName -Level 'Detail'
+        }
+
+        if ($AllowPrompts -and -not $Force -and -not $WhatIfPreference)
+        {
+            $Answer = Read-Host -Prompt 'Remove these files? [y/N]'
+
+            if ($Answer -notmatch '^(y|yes)$')
+            {
+                Complete-InstallStep
+                Complete-InstallProgress
+                Write-Output ''
+                Write-Console 'Uninstall cancelled. Nothing was removed.' -Level 'Warning'
+                return
+            }
+        }
+
+        $UninstallBackupDirectory = Join-Path -Path $HOME -ChildPath ".copilot\agent-backups\v5_$(Get-Date -Format 'yyyyMMdd_HHmmssfff')"
+
+        $UninstallResult = Remove-CouncilAgentFile `
+        -AgentDirectory $AgentDirectory `
+        -BackupDirectory $UninstallBackupDirectory `
+        -CoordinatorFileName $CoordinatorFileName `
+        -CoordinatorAgentName $CoordinatorAgentName
+
+        if ($UninstallResult.Removed.Count -gt 0)
+        {
+            Remove-ExpiredBackup `
+            -BackupRoot (Split-Path -Path $UninstallBackupDirectory -Parent) `
+            -CurrentBackupDirectory $UninstallBackupDirectory `
+            -KeepCount $BackupRetentionCount
+        }
+    }
+    finally
+    {
+        if ($UninstallMutexAcquired)
+        {
+            $UninstallMutex.ReleaseMutex()
+        }
+
+        $UninstallMutex.Dispose()
+    }
+
+    Complete-InstallStep
+    Complete-InstallProgress
+
+    Write-Output ''
+
+    if ($WhatIfPreference)
+    {
+        Write-Console 'Preview only. Nothing was removed.' -Level 'Warning'
+    }
+    elseif ($UninstallResult.Failed.Count -gt 0)
+    {
+        Write-Console ('Removed {0} of {1} file(s) in {2}. Some could not be removed.' -f $UninstallResult.Removed.Count, $UninstallResult.Examined, (Format-Elapsed -Elapsed $InstallTimer.Elapsed)) -Level 'Warning'
+    }
+    else
+    {
+        Write-Console ('Uninstall completed in {0}.' -f (Format-Elapsed -Elapsed $InstallTimer.Elapsed)) -Level 'Success'
+    }
+
+    Write-Output ''
+    Write-Output "Agent directory: $AgentDirectory"
+
+    if ($WhatIfPreference)
+    {
+        Write-Output ("Would remove: {0}" -f $(if ($UninstallResult.WouldRemove.Count -gt 0) { $UninstallResult.WouldRemove -join ', ' } else { 'nothing' }))
+    }
+    else
+    {
+        Write-Output ("Removed:  {0}" -f $(if ($UninstallResult.Removed.Count -gt 0) { $UninstallResult.Removed -join ', ' } else { 'nothing' }))
+    }
+
+    if ($UninstallResult.Skipped.Count -gt 0)
+    {
+        Write-Output ("Left alone: {0}" -f ($UninstallResult.Skipped -join '; '))
+    }
+
+    if ($UninstallResult.Failed.Count -gt 0)
+    {
+        Write-Output ("Could not remove: {0}" -f ($UninstallResult.Failed -join '; '))
+        Write-Output 'Close VS Code or any editor holding these files, then run the same command again.'
+    }
+
+    if ($UninstallResult.Removed.Count -gt 0)
+    {
+        Write-Output ''
+        Write-Output "Copies of every removed file were kept in $UninstallBackupDirectory"
+    }
+
+    Write-Output ''
+    Write-Output 'Left in place on purpose:'
+    Write-Output ("  Earlier backups under {0}" -f (Join-Path -Path $HOME -ChildPath '.copilot\agent-backups'))
+    Write-Output '  The chat.subagents.allowInvocationsFromSubagents setting in your VS Code settings.json.'
+    Write-Output '  This installer never recorded whether it turned that on or found it already on,'
+    Write-Output '  so it will not guess. Set it to false by hand if nothing else relies on it.'
+
+    return
+}
+
 # The step list is built from the parameters actually in play, so a run that skips work still
 # counts up to its own total instead of stopping at something like 6 of 9.
 $InstallSteps = New-Object System.Collections.Generic.List[string]
@@ -4758,25 +5228,10 @@ Start-InstallStep -Name 'Resolve install scope'
 # Decides where the agent files go. User scope makes the council available in every workspace,
 # workspace scope confines it to one repository. This has to happen before model selection,
 # because the previous-installation check reads from whichever directory is chosen here.
-if ($Scope -eq 'Workspace')
-{
-    if ([string]::IsNullOrWhiteSpace($WorkspacePath))
-    {
-        throw 'WorkspacePath must be specified when -Scope Workspace is used.'
-    }
-
-    if (-not (Test-Path -LiteralPath $WorkspacePath -PathType Container))
-    {
-        throw "Workspace path is not an existing directory: $WorkspacePath"
-    }
-
-    $ResolvedWorkspacePath = (Resolve-Path -LiteralPath $WorkspacePath).Path
-    $AgentDirectory = Join-Path -Path $ResolvedWorkspacePath -ChildPath '.github\agents'
-}
-else
-{
-    $AgentDirectory = Join-Path -Path $HOME -ChildPath '.copilot\agents'
-}
+#
+# Uninstall calls the same helper, so the directory it sweeps can never drift from the one an
+# install wrote to.
+$AgentDirectory = Resolve-CouncilAgentDirectory -Scope $Scope -WorkspacePath $WorkspacePath
 
 $InstallMutex = New-Object System.Threading.Mutex($false, 'Local\VSCodeCopilotCouncilInstaller')
 

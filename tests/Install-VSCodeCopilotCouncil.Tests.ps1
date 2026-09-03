@@ -60,6 +60,8 @@ BeforeAll {
         'New-ExpertAgentContent',
         'New-CoordinatorAgentContent',
         'Test-OwnedAgentFile',
+        'Remove-CouncilAgentFile',
+        'Resolve-CouncilAgentDirectory',
         'Test-AgentFile',
         'Test-GeneratedAgentFile',
         'Get-PublishedScriptVersion',
@@ -2866,5 +2868,401 @@ Describe 'Tier taxonomy stays synchronized' {
         $script:InstallerText | Should -Match ('(?m)^        ' + [regex]::Escape($Version) + '\r?$')
         $script:ReadmeText | Should -Match ('badge/version-' + [regex]::Escape($Version) + '-blue')
         $script:ReadmeText | Should -Match ('alt="Version ' + [regex]::Escape($Version) + '"')
+    }
+}
+
+Describe 'Uninstall' {
+
+    BeforeAll {
+        $script:CoordinatorFile = 'multi-model-engineering-council.agent.md'
+        $script:CoordinatorName = 'Multi-Model Engineering Council'
+
+        function New-TestCoordinator
+        {
+            param ([string]$Path, [string]$Name = 'Multi-Model Engineering Council')
+
+            @(
+                '---'
+                'name: ' + $Name
+                'target: vscode'
+                'user-invocable: true'
+                'disable-model-invocation: true'
+                'model: Claude Opus 5'
+                '---'
+                ''
+                'Configured experts'
+                ''
+                '- Claude Opus 5 Expert running Claude Opus 5, primary lens Implementation'
+            ) -join "`r`n" | Set-Content -LiteralPath $Path -Encoding UTF8
+        }
+
+        function New-TestWorker
+        {
+            param ([string]$Path, [string]$Name = 'Claude Opus 5 Expert')
+
+            @(
+                '---'
+                'name: ' + $Name
+                'target: vscode'
+                'user-invocable: false'
+                'disable-model-invocation: false'
+                'model: Claude Opus 5'
+                '---'
+                ''
+                'Body text.'
+            ) -join "`r`n" | Set-Content -LiteralPath $Path -Encoding UTF8
+        }
+
+        function New-TestRoster
+        {
+            param ([string]$Directory)
+
+            New-Item -Path $Directory -ItemType Directory -Force | Out-Null
+            New-TestCoordinator -Path (Join-Path $Directory $script:CoordinatorFile)
+            New-TestWorker -Path (Join-Path $Directory 'mm-expert-claude-opus-5.agent.md') -Name 'Claude Opus 5 Expert'
+            New-TestWorker -Path (Join-Path $Directory 'mm-reviewer-claude-opus-5.agent.md') -Name 'Claude Opus 5 Reviewer'
+        }
+    }
+
+    BeforeEach {
+        $script:UninstallRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-uninstall-$([guid]::NewGuid().ToString('N'))"
+        $script:UninstallAgents = Join-Path -Path $script:UninstallRoot -ChildPath '.github\agents'
+        $script:UninstallBackups = Join-Path -Path $script:UninstallRoot -ChildPath 'backups'
+        New-Item -Path $script:UninstallRoot -ItemType Directory -Force | Out-Null
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:UninstallRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Context 'Coordinator ownership' {
+
+        It 'recognizes the coordinator that this installer writes' {
+            New-Item -Path $script:UninstallAgents -ItemType Directory -Force | Out-Null
+            $Path = Join-Path $script:UninstallAgents $script:CoordinatorFile
+            New-TestCoordinator -Path $Path
+
+            Test-OwnedAgentFile -Path $Path -CoordinatorName $script:CoordinatorName | Should -BeTrue
+        }
+
+        It 'refuses a coordinator whose name is not the one it installed' {
+            New-Item -Path $script:UninstallAgents -ItemType Directory -Force | Out-Null
+            $Path = Join-Path $script:UninstallAgents $script:CoordinatorFile
+            New-TestCoordinator -Path $Path -Name 'Somebody Else Council'
+
+            Test-OwnedAgentFile -Path $Path -CoordinatorName $script:CoordinatorName | Should -BeFalse
+        }
+
+        It 'still reports the coordinator as not a worker, so the install-time sweep is unchanged' {
+            # Both existing call sites pass -Path only. If the worker test ever started accepting the
+            # coordinator, the stale sweep would delete the roster mid-install.
+            New-Item -Path $script:UninstallAgents -ItemType Directory -Force | Out-Null
+            $Path = Join-Path $script:UninstallAgents $script:CoordinatorFile
+            New-TestCoordinator -Path $Path
+
+            Test-OwnedAgentFile -Path $Path | Should -BeFalse
+        }
+
+        It 'refuses a worker when asked for a coordinator' {
+            New-Item -Path $script:UninstallAgents -ItemType Directory -Force | Out-Null
+            $Path = Join-Path $script:UninstallAgents 'mm-expert-claude-opus-5.agent.md'
+            New-TestWorker -Path $Path
+
+            Test-OwnedAgentFile -Path $Path -CoordinatorName $script:CoordinatorName | Should -BeFalse
+        }
+    }
+
+    Context 'Removal engine' {
+
+        It 'removes the whole roster including the coordinator' {
+            New-TestRoster -Directory $script:UninstallAgents
+
+            $Result = Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            $Result.Removed.Count | Should -Be 3
+            $Result.Failed.Count | Should -Be 0
+            @(Get-ChildItem -LiteralPath $script:UninstallAgents -File).Count | Should -Be 0
+        }
+
+        It 'removes the coordinator last, so the roster survives while anything else does' {
+            # The coordinator is the only file recording which models were installed. Deleting it
+            # first would leave unexplained mm-* files behind if a later delete failed.
+            New-TestRoster -Directory $script:UninstallAgents
+
+            $Result = Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            $Result.Removed[$Result.Removed.Count - 1] | Should -BeExactly $script:CoordinatorFile
+        }
+
+        It 'keeps a file that matches the naming pattern but is not this installer''s' {
+            New-TestRoster -Directory $script:UninstallAgents
+            $Foreign = Join-Path $script:UninstallAgents 'mm-expert-someone-else.agent.md'
+            @('---', 'name: Handwritten Helper', 'target: vscode', 'user-invocable: true', '---', '', 'Mine.') -join "`r`n" |
+                Set-Content -LiteralPath $Foreign -Encoding UTF8
+
+            $Result = Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            Test-Path -LiteralPath $Foreign | Should -BeTrue
+            $Result.Skipped.Count | Should -Be 1
+        }
+
+        It 'never touches a file outside its own naming patterns' {
+            New-TestRoster -Directory $script:UninstallAgents
+            $Bystander = Join-Path $script:UninstallAgents 'my-own.agent.md'
+            'Untouched.' | Set-Content -LiteralPath $Bystander -Encoding UTF8
+
+            Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            Get-Content -LiteralPath $Bystander -Raw | Should -Match 'Untouched'
+        }
+
+        It 'keeps a recoverable copy of every file it removes' {
+            New-TestRoster -Directory $script:UninstallAgents
+
+            Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            @(Get-ChildItem -LiteralPath $script:UninstallBackups -File).Count | Should -Be 3
+        }
+
+        It 'removes what it can when one file is locked, rather than abandoning the rest' {
+            # VS Code holding one agent file open is the ordinary state on a developer machine.
+            # Refusing the whole uninstall over it would leave the council installed and loading.
+            New-TestRoster -Directory $script:UninstallAgents
+            $Locked = Join-Path $script:UninstallAgents 'mm-expert-claude-opus-5.agent.md'
+            $Stream = [System.IO.File]::Open($Locked, 'Open', 'Read', 'None')
+
+            try
+            {
+                $Result = Remove-CouncilAgentFile `
+                    -AgentDirectory $script:UninstallAgents `
+                    -BackupDirectory $script:UninstallBackups `
+                    -CoordinatorFileName $script:CoordinatorFile `
+                    -CoordinatorAgentName $script:CoordinatorName 6>$null 3>$null
+            }
+            finally
+            {
+                $Stream.Dispose()
+            }
+
+            $Result.Failed.Count | Should -Be 1
+            $Result.Removed.Count | Should -Be 2
+            Test-Path -LiteralPath $Locked | Should -BeTrue
+        }
+
+        It 'reports a clean result when the directory does not exist' {
+            $Result = Remove-CouncilAgentFile `
+                -AgentDirectory (Join-Path $script:UninstallRoot 'nothing-here') `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            $Result.Examined | Should -Be 0
+            $Result.Removed.Count | Should -Be 0
+            $Result.Failed.Count | Should -Be 0
+        }
+
+        It 'reports nothing removed and nothing failed under -WhatIf' {
+            # The gate has to stop before the backup copy rather than leaning on Remove-Item's own
+            # -WhatIf. Leaning on that would leave the file in place and then report it as a
+            # failure, so a preview run would read as a broken uninstall.
+            New-TestRoster -Directory $script:UninstallAgents
+
+            $Result = Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName -WhatIf 6>$null
+
+            $Result.Removed.Count | Should -Be 0
+            $Result.Failed.Count | Should -Be 0
+            @(Get-ChildItem -LiteralPath $script:UninstallAgents -File).Count | Should -Be 3
+            Test-Path -LiteralPath $script:UninstallBackups | Should -BeFalse
+        }
+
+        It 'names the files a preview would have removed' {
+            # A preview that reports nothing is indistinguishable from an uninstall that found
+            # nothing, which is the one thing the user ran it to tell apart.
+            New-TestRoster -Directory $script:UninstallAgents
+
+            $Result = Remove-CouncilAgentFile `
+                -AgentDirectory $script:UninstallAgents `
+                -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile `
+                -CoordinatorAgentName $script:CoordinatorName -WhatIf 6>$null
+
+            $Result.WouldRemove.Count | Should -Be 3
+            $Result.WouldRemove | Should -Contain $script:CoordinatorFile
+        }
+
+        It 'is idempotent when run a second time' {
+            New-TestRoster -Directory $script:UninstallAgents
+
+            $Arguments = @{
+                AgentDirectory = $script:UninstallAgents
+                BackupDirectory = $script:UninstallBackups
+                CoordinatorFileName = $script:CoordinatorFile
+                CoordinatorAgentName = $script:CoordinatorName
+            }
+
+            Remove-CouncilAgentFile @Arguments 6>$null
+            $Second = Remove-CouncilAgentFile @Arguments 6>$null
+
+            $Second.Examined | Should -Be 0
+            $Second.Failed.Count | Should -Be 0
+        }
+    }
+
+    Context 'Scope resolution' {
+
+        It 'sends user scope to the directory the installer writes to' {
+            # Install and uninstall call this same helper, so the swept directory can never drift
+            # from the one an install created.
+            Resolve-CouncilAgentDirectory -Scope 'User' |
+                Should -BeExactly (Join-Path -Path $HOME -ChildPath '.copilot\agents')
+        }
+
+        It 'sends workspace scope into the repository' {
+            Resolve-CouncilAgentDirectory -Scope 'Workspace' -WorkspacePath $script:UninstallRoot |
+                Should -BeExactly (Join-Path -Path $script:UninstallRoot -ChildPath '.github\agents')
+        }
+
+        It 'refuses a workspace path that resolves against ambient state: <Label>' -ForEach @(
+            @{ Label = 'drive-relative'; Path = 'C:repo' }
+            @{ Label = 'root-relative'; Path = '\repo' }
+            @{ Label = 'device namespace'; Path = '\\?\C:\repo' }
+        ) {
+            { Resolve-CouncilAgentDirectory -Scope 'Workspace' -WorkspacePath $Path } |
+                Should -Throw '*must be a full path*'
+        }
+
+        It 'still requires a workspace path when workspace scope is chosen' {
+            { Resolve-CouncilAgentDirectory -Scope 'Workspace' } | Should -Throw '*must be specified*'
+        }
+    }
+
+    Context 'End to end' {
+
+        BeforeEach {
+            & $script:InstallerPath `
+                -Scope Workspace `
+                -WorkspacePath $script:UninstallRoot `
+                -NonInteractive `
+                -SkipUpdateCheck `
+                -SkipVSCodeSetting `
+                -Models 'Claude Opus 5', 'Grok 4.5' | Out-Null
+        }
+
+        It 'removes every file a real install created' {
+            @(Get-ChildItem -LiteralPath $script:UninstallAgents -File).Count | Should -Be 5
+
+            & $script:InstallerPath `
+                -Uninstall `
+                -Scope Workspace `
+                -WorkspacePath $script:UninstallRoot `
+                -NonInteractive `
+                -SkipUpdateCheck | Out-Null
+
+            @(Get-ChildItem -LiteralPath $script:UninstallAgents -File).Count | Should -Be 0
+        }
+
+        It 'removes nothing under -WhatIf' {
+            & $script:InstallerPath `
+                -Uninstall `
+                -Scope Workspace `
+                -WorkspacePath $script:UninstallRoot `
+                -NonInteractive `
+                -SkipUpdateCheck `
+                -WhatIf | Out-Null
+
+            @(Get-ChildItem -LiteralPath $script:UninstallAgents -File).Count | Should -Be 5
+        }
+
+        It 'leaves a council in a different workspace alone' {
+            $Other = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "council-other-$([guid]::NewGuid().ToString('N'))"
+            New-Item -Path $Other -ItemType Directory -Force | Out-Null
+
+            try
+            {
+                & $script:InstallerPath `
+                    -Scope Workspace -WorkspacePath $Other `
+                    -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting `
+                    -Models 'Claude Opus 5' | Out-Null
+
+                & $script:InstallerPath `
+                    -Uninstall -Scope Workspace -WorkspacePath $script:UninstallRoot `
+                    -NonInteractive -SkipUpdateCheck | Out-Null
+
+                @(Get-ChildItem -LiteralPath (Join-Path $Other '.github\agents') -File).Count | Should -Be 3
+            }
+            finally
+            {
+                Remove-Item -LiteralPath $Other -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'succeeds quietly when run twice' {
+            $Arguments = @{
+                Uninstall = $true
+                Scope = 'Workspace'
+                WorkspacePath = $script:UninstallRoot
+                NonInteractive = $true
+                SkipUpdateCheck = $true
+            }
+
+            & $script:InstallerPath @Arguments | Out-Null
+            { & $script:InstallerPath @Arguments | Out-Null } | Should -Not -Throw
+        }
+
+        It 'refuses to combine removal with model selection' {
+            {
+                & $script:InstallerPath `
+                    -Uninstall -Scope Workspace -WorkspacePath $script:UninstallRoot `
+                    -NonInteractive -SkipUpdateCheck -Models 'Claude Opus 5'
+            } | Should -Throw '*cannot be combined with*'
+        }
+
+        It 'refuses -WhatIf on an install, rather than installing anyway' {
+            {
+                & $script:InstallerPath `
+                    -Scope Workspace -WorkspacePath $script:UninstallRoot `
+                    -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting `
+                    -Models 'Claude Opus 5' -WhatIf
+            } | Should -Throw '*only supported together with -Uninstall*'
+        }
+
+        It 'never writes agent backups outside the directory it was told to use' {
+            # The install-time backup root is under $HOME regardless of scope. A workspace uninstall
+            # that quietly wrote somewhere else would be invisible until it evicted real backups.
+            $Before = @(Get-ChildItem -LiteralPath (Join-Path $HOME '.copilot\agent-backups') -Directory -ErrorAction SilentlyContinue).Count
+
+            & $script:InstallerPath `
+                -Uninstall -Scope Workspace -WorkspacePath $script:UninstallRoot `
+                -NonInteractive -SkipUpdateCheck | Out-Null
+
+            $After = @(Get-ChildItem -LiteralPath (Join-Path $HOME '.copilot\agent-backups') -Directory -ErrorAction SilentlyContinue).Count
+
+            # Retention caps the folder count, so this asserts the cap held rather than a raw delta.
+            $After | Should -BeLessOrEqual ([Math]::Max($Before, $script:BackupRetentionCount))
+        }
     }
 }
