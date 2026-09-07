@@ -5,7 +5,10 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
-## Unreleased
+## 5.19.0
+
+This release also includes the previously unpublished 5.18.0 changes: supported uninstall,
+safe removal diagnostics, and live recommendation-reference verification.
 
 ### Fixed
 

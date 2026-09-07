@@ -231,7 +231,7 @@
         September 7th, 2026
 
     Version:
-        5.18.0
+        5.19.0
 
     Compatible with:
         Windows PowerShell 5.1
@@ -422,7 +422,7 @@ $BackupRetentionCount = 10
 
 # Keep this in sync with the Version entry in the .NOTES block. The update check compares it against
 # the same constant in the published copy, so it is the single source of truth for the version.
-$ScriptVersion = '5.18.0'
+$ScriptVersion = '5.19.0'
 
 # Change this to your own owner/repo to point the update check somewhere else.
 $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
