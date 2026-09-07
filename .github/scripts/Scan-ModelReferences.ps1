@@ -115,9 +115,26 @@ function Get-AssignedStringLiteral
     return @($Literals | ForEach-Object { $_.Value } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+function Read-ReferenceFile
+{
+    param ([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $Bytes = [System.IO.File]::ReadAllBytes($LiteralPath)
+    $HasBom = $Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF
+    $Offset = if ($HasBom) { 3 } else { 0 }
+    $Utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+
+    return [PSCustomObject]@{
+        Bytes = $Bytes
+        Content = $Utf8.GetString($Bytes, $Offset, $Bytes.Length - $Offset)
+        HasBom = $HasBom
+    }
+}
+
 $Tokens = $null
 $ParseErrors = $null
-$InstallerAst = [System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$Tokens, [ref]$ParseErrors)
+$InstallerSnapshot = Read-ReferenceFile -LiteralPath $InstallerPath
+$InstallerAst = [System.Management.Automation.Language.Parser]::ParseInput($InstallerSnapshot.Content, [ref]$Tokens, [ref]$ParseErrors)
 
 if ($ParseErrors.Count -gt 0)
 {
@@ -142,12 +159,35 @@ if ($KnownNames.Count -eq 0)
     throw 'No model identifiers were found in the installer registry, so there is nothing to match against.'
 }
 
-$AliasSource = @(Get-AssignedStringLiteral -Ast $InstallerAst -VariableName 'ModelAliasMap')
-$AliasMap = @{}
+$NamePattern = '(?<![A-Za-z0-9])(?:' + (($KnownNames | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?![A-Za-z0-9])'
+$NameMatcher = New-Object System.Text.RegularExpressions.Regex($NamePattern, [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+$AliasMap = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+$AliasAssignment = $InstallerAst.Find({
+    param ($Node)
+    $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $Node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $Node.Left.VariablePath.UserPath -eq 'ModelAliasMap'
+}, $true)
 
-for ($Index = 0; $Index + 1 -lt $AliasSource.Count; $Index += 2)
+if ($null -ne $AliasAssignment)
 {
-    $AliasMap[$AliasSource[$Index]] = $AliasSource[$Index + 1]
+    $AliasLiteral = $AliasAssignment.Right.Find({ param ($Node) $Node -is [System.Management.Automation.Language.HashtableAst] }, $true)
+
+    if ($null -eq $AliasLiteral)
+    {
+        throw 'ModelAliasMap must be a literal hashtable; the scanner never executes registry expressions.'
+    }
+
+    foreach ($Entry in $AliasLiteral.SafeGetValue().GetEnumerator())
+    {
+        if ($Entry.Key -isnot [string] -or $Entry.Value -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($Entry.Key) -or [string]::IsNullOrWhiteSpace($Entry.Value))
+        {
+            throw 'ModelAliasMap must contain nonempty string names and replacements.'
+        }
+
+        $AliasMap[$Entry.Key] = $Entry.Value
+    }
 }
 
 $LifecycleNames = @(Get-AssignedStringLiteral -Ast $InstallerAst -VariableName 'ModelLifecycle')
@@ -176,97 +216,118 @@ $Targets = New-Object System.Collections.Generic.List[object]
 
 $ScannedExtensions = @('.ps1', '.psd1', '.psm1', '.md', '.yml', '.yaml', '.json', '.jsonc')
 
-foreach ($File in (Get-ChildItem -LiteralPath $RepositoryRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $ScannedExtensions -contains $_.Extension.ToLowerInvariant() }))
+$Directories = New-Object System.Collections.Generic.Stack[string]
+$Directories.Push($RepositoryRoot)
+
+while ($Directories.Count -gt 0)
 {
-    $Relative = $File.FullName.Substring($RepositoryRoot.Length).TrimStart('\', '/')
-
-    # Anchored to a separator so this does not also swallow .github, which is where the maintainer
-    # scripts and workflows live.
-    if ($Relative -match '^\.git[\\/]' -or $Relative -match '^temp-' -or $Relative -match '[\\/]temp-')
+    foreach ($File in (Get-ChildItem -LiteralPath $Directories.Pop() -ErrorAction SilentlyContinue))
     {
-        continue
+        if ($File.Name -eq '.git' -or $File.Name -like 'temp-*' -or
+            $File.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint))
+        {
+            continue
+        }
+
+        if ($File.PSIsContainer)
+        {
+            $Directories.Push($File.FullName)
+            continue
+        }
+
+        if ($ScannedExtensions -notcontains $File.Extension.ToLowerInvariant())
+        {
+            continue
+        }
+
+        $Relative = $File.FullName.Substring($RepositoryRoot.Length).TrimStart('\', '/')
+        $Class = Get-FileClass -RelativePath $Relative
+
+        if ($Class -eq 'historical' -and -not $IncludeChangelog)
+        {
+            continue
+        }
+
+        $Targets.Add([PSCustomObject]@{ Path = $File.FullName; Relative = $Relative; Class = $Class })
     }
-
-    $Class = Get-FileClass -RelativePath $Relative
-
-    if ($Class -eq 'historical' -and -not $IncludeChangelog)
-    {
-        continue
-    }
-
-    $Targets.Add([PSCustomObject]@{ Path = $File.FullName; Relative = $Relative; Class = $Class })
 }
 
 $Findings = New-Object System.Collections.Generic.List[object]
+$FileStates = @{}
 
 foreach ($Target in $Targets)
 {
-    $Content = Get-Content -LiteralPath $Target.Path -Raw -ErrorAction SilentlyContinue
+    try
+    {
+        $Snapshot = if ($Target.Class -eq 'registry') { $InstallerSnapshot } else { Read-ReferenceFile -LiteralPath $Target.Path }
+    }
+    catch
+    {
+        Write-Warning "Skipped unreadable or invalid UTF-8 file: $($Target.Relative). $($_.Exception.Message)"
+        continue
+    }
+
+    $Content = $Snapshot.Content
 
     if ([string]::IsNullOrEmpty($Content))
     {
         continue
     }
 
-    $Lines = $Content -split '\r?\n'
-    $ConsideredLines = $null
+    $Literals = @()
     $Mode = 'text'
+    $IsPowerShell = @('.ps1', '.psm1', '.psd1') -contains [System.IO.Path]::GetExtension($Target.Path)
 
-    if ($Target.Path -like '*.ps1')
+    if ($IsPowerShell)
     {
         $FileTokens = $null
-        $FileErrors = $null
-        $FileAst = [System.Management.Automation.Language.Parser]::ParseFile($Target.Path, [ref]$FileTokens, [ref]$FileErrors)
+        $FileErrors = @()
+        $FileAst = if ($Target.Class -eq 'registry') { $InstallerAst } else {
+            [System.Management.Automation.Language.Parser]::ParseInput($Content, [ref]$FileTokens, [ref]$FileErrors)
+        }
 
         if ($FileErrors.Count -eq 0)
         {
             $Mode = 'ast'
-            $ConsideredLines = @{}
-
-            foreach ($Literal in $FileAst.FindAll({ param ($Node) return $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true))
-            {
-                $ConsideredLines[$Literal.Extent.StartLineNumber] = $true
-            }
+            $Literals = @($FileAst.FindAll({
+                param ($Node)
+                $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                    -not ($Node.Parent -is [System.Management.Automation.Language.CommandAst] -and $Node.Parent.CommandElements[0] -eq $Node)
+            }, $true))
         }
     }
 
-    for ($Number = 1; $Number -le $Lines.Count; $Number++)
+    $FileStates[$Target.Relative] = @{
+        Snapshot = $Snapshot; Literals = $Literals; IsPowerShell = $IsPowerShell; Mode = $Mode
+    }
+    $Regions = if ($Mode -eq 'ast') {
+        @($Literals | ForEach-Object { [PSCustomObject]@{ Offset = $_.Extent.StartOffset; Text = $_.Extent.Text } })
+    } else {
+        @([PSCustomObject]@{ Offset = 0; Text = $Content })
+    }
+    [int[]]$LineStarts = @(0) + @([regex]::Matches($Content, '\n') | ForEach-Object { $_.Index + 1 })
+
+    foreach ($Region in $Regions)
     {
-        $Line = $Lines[$Number - 1]
-
-        if ($Mode -eq 'ast' -and -not $ConsideredLines.ContainsKey($Number))
+        foreach ($Match in $NameMatcher.Matches($Region.Text))
         {
-            continue
-        }
-
-        foreach ($Name in $KnownNames)
-        {
-            $Pattern = '(^|[^A-Za-z0-9])' + [regex]::Escape($Name) + '([^A-Za-z0-9]|$)'
-
-            if ($Line -cmatch $Pattern)
+            $Name = $Match.Value
+            $Offset = $Region.Offset + $Match.Index
+            $LineIndex = [System.Array]::BinarySearch([array]$LineStarts, [object]$Offset)
+            if ($LineIndex -lt 0)
             {
-                $Replacement = ''
-
-                foreach ($Key in $AliasMap.Keys)
-                {
-                    if ([string]::Equals($Key, $Name, [System.StringComparison]::Ordinal))
-                    {
-                        $Replacement = [string]$AliasMap[$Key]
-                    }
-                }
-
-                $Findings.Add([PSCustomObject]@{
-                        File = $Target.Relative
-                        Line = $Number
-                        Class = $Target.Class
-                        Mode = $Mode
-                        Model = $Name
-                        Replacement = $Replacement
-                        Lifecycle = $(if ($LifecycleNames -contains $Name) { 'recorded' } else { 'none' })
-                    })
-
-                break
+                $LineIndex = (-bnot $LineIndex) - 1
             }
+
+            $Findings.Add([PSCustomObject]@{
+                    File = $Target.Relative
+                    Line = $LineIndex + 1
+                    Class = $Target.Class
+                    Mode = $Mode
+                    Model = $Name
+                    Replacement = $(if ($AliasMap.ContainsKey($Name)) { $AliasMap[$Name] } else { '' })
+                    Lifecycle = $(if ($LifecycleNames -contains $Name) { 'recorded' } else { 'none' })
+                })
         }
     }
 }
@@ -314,14 +375,14 @@ if ($FixtureCount -gt 0)
     Write-Output "  ($FixtureCount test-fixture references not listed; a fixture naming a model is not drift.)"
 }
 
-$Renameable = @($Findings | Where-Object { -not [string]::IsNullOrEmpty($_.Replacement) })
+$Renameable = @($Findings | Where-Object { $_.Class -ne 'registry' -and -not [string]::IsNullOrEmpty($_.Replacement) })
 
 Write-Output ''
 Write-Output "RECORDED RENAMES ($($Renameable.Count))"
 
 if ($Renameable.Count -eq 0)
 {
-    Write-Output '  none. $ModelAliasMap is empty, so no replacement is recommended for anything.'
+    Write-Output '  none. No references outside the registry match a recorded rename.'
 }
 else
 {
@@ -360,23 +421,79 @@ if ($ApplyAliases)
         Write-Output ''
         Write-Output 'APPLYING RECORDED RENAMES'
 
+        foreach ($Finding in $Renameable)
+        {
+            $State = $FileStates[$Finding.File]
+            if ($State.IsPowerShell -and $State.Mode -ne 'ast')
+            {
+                throw "PowerShell file does not parse, so aliases were not applied: $($Finding.File)"
+            }
+        }
+
+        $ReplaceAlias = [System.Text.RegularExpressions.MatchEvaluator]{
+            param ($Match)
+            if ($AliasMap.ContainsKey($Match.Value)) { return $AliasMap[$Match.Value] }
+            return $Match.Value
+        }
+
         foreach ($Group in ($Renameable | Group-Object -Property 'File'))
         {
             $FullPath = Join-Path -Path $RepositoryRoot -ChildPath $Group.Name
-            $Original = Get-Content -LiteralPath $FullPath -Raw
+            $State = $FileStates[$Group.Name]
+            $Original = $State.Snapshot.Content
             $Updated = $Original
 
-            foreach ($Finding in $Group.Group)
+            if ($State.IsPowerShell)
             {
-                $Pattern = '(?<lead>^|[^A-Za-z0-9])' + [regex]::Escape($Finding.Model) + '(?<trail>[^A-Za-z0-9]|$)'
-                $Updated = [regex]::Replace($Updated, $Pattern, { param ($Match) $Match.Groups['lead'].Value + $Finding.Replacement + $Match.Groups['trail'].Value })
+                foreach ($Literal in ($State.Literals | Sort-Object -Property { $_.Extent.StartOffset } -Descending))
+                {
+                    $Value = $NameMatcher.Replace($Literal.Value, $ReplaceAlias)
+                    if ($Value -ceq $Literal.Value) { continue }
+
+                    $Encoded = "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Value) + "'"
+                    $Updated = $Updated.Remove($Literal.Extent.StartOffset, $Literal.Extent.EndOffset - $Literal.Extent.StartOffset).Insert($Literal.Extent.StartOffset, $Encoded)
+                }
+            }
+            else
+            {
+                $Updated = $NameMatcher.Replace($Original, $ReplaceAlias)
             }
 
-            if ($Updated -ne $Original)
+            if ($Updated -cne $Original)
             {
-                Set-Content -LiteralPath "$FullPath.bak" -Value $Original -NoNewline
-                Set-Content -LiteralPath $FullPath -Value $Updated -NoNewline
-                Write-Output "  updated $($Group.Name), previous content saved to $($Group.Name).bak"
+                if (-not [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals(
+                    [System.IO.File]::ReadAllBytes($FullPath), $State.Snapshot.Bytes))
+                {
+                    throw "File changed during the scan and was not overwritten: $($Group.Name)"
+                }
+
+                $BackupPath = "$FullPath.bak"
+                if (Test-Path -LiteralPath $BackupPath)
+                {
+                    $BackupPath = "$FullPath.$([guid]::NewGuid().ToString('N')).bak"
+                }
+                [System.IO.File]::Copy($FullPath, $BackupPath, $false)
+
+                [byte[]]$UpdatedBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($Updated)
+                if ($State.Snapshot.HasBom) { $UpdatedBytes = [byte[]](0xEF, 0xBB, 0xBF) + $UpdatedBytes }
+                $TemporaryPath = "$FullPath.$([guid]::NewGuid().ToString('N')).tmp"
+
+                try
+                {
+                    [System.IO.File]::WriteAllBytes($TemporaryPath, $UpdatedBytes)
+                    if (-not [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals(
+                        [System.IO.File]::ReadAllBytes($FullPath), $State.Snapshot.Bytes))
+                    {
+                        throw "File changed before replacement and was not overwritten: $($Group.Name)"
+                    }
+                    [System.IO.File]::Replace($TemporaryPath, $FullPath, [System.Management.Automation.Language.NullString]::Value, $true)
+                }
+                finally
+                {
+                    Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-Output "  updated $($Group.Name), previous content saved to $(Split-Path -Path $BackupPath -Leaf)"
             }
         }
     }

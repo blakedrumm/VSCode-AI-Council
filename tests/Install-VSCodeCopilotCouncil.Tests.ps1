@@ -6,12 +6,14 @@ BeforeAll {
 
     $script:RepositoryRoot = Split-Path -Path $PSScriptRoot -Parent
     $script:InstallerPath = Join-Path -Path $script:RepositoryRoot -ChildPath 'Install-VSCodeCopilotCouncil-v5.ps1'
+    $script:ShippingInstallerPath = $script:InstallerPath
+    $script:SandboxHome = Join-Path $TestDrive 'home'
     $script:ReadmePath = Join-Path -Path $script:RepositoryRoot -ChildPath 'README.md'
     $script:RecommendationReviewPath = Join-Path -Path $script:RepositoryRoot -ChildPath '.github/model-recommendation-review.json'
     $Tokens = $null
     $ParseErrors = $null
-    $script:InstallerAst = [System.Management.Automation.Language.Parser]::ParseFile(
-        $script:InstallerPath,
+    $script:InstallerAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        [System.IO.File]::ReadAllText($script:InstallerPath),
         [ref]$Tokens,
         [ref]$ParseErrors)
 
@@ -24,6 +26,7 @@ BeforeAll {
         'Write-Console',
         'ConvertTo-NormalizedText',
         'Write-Utf8File',
+        'Write-AtomicFile',
         'Read-Utf8File',
         'Get-FileStateSnapshot',
         'Test-RestoreIsSafe',
@@ -94,7 +97,7 @@ BeforeAll {
 
     # The generators read these script-level constants, so the harness has to load the real values
     # rather than restate them, or the tests would stop tracking the installer.
-    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'UntrustedContentPolicy', 'Tier5BoundsPolicy', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount', 'DefaultModelCatalog', 'DefaultModelCategoryMap', 'RecommendationDate', 'RoleModelRegistry', 'ModelAliasMap', 'ModelLifecycle', 'CoordinatorRoleId', 'ChallengerRoleId'))
+    foreach ($ConstantName in @('ReviewerAgentTools', 'ExpertAgentTools', 'CoordinatorAgentTools', 'EvidenceHierarchy', 'EvidenceHierarchyText', 'EvidenceRankingNote', 'UntrustedContentPolicy', 'ModelIdentityPolicy', 'Tier5BoundsPolicy', 'LensCatalog', 'MaxModelCount', 'BackupRetentionCount', 'DefaultModelCatalog', 'DefaultModelCategoryMap', 'RecommendationDate', 'RoleModelRegistry', 'ModelAliasMap', 'ModelLifecycle', 'CoordinatorRoleId', 'ChallengerRoleId'))
     {
         $ConstantAst = $script:InstallerAst.Find(
             {
@@ -114,6 +117,58 @@ BeforeAll {
         . ([scriptblock]::Create($ConstantAst.Extent.Text))
         Set-Variable -Name $ConstantName -Scope 'Script' -Value (Get-Variable -Name $ConstantName -ValueOnly)
     }
+
+    function New-InstallerTestVariant {
+        param (
+            [hashtable]$FunctionSuffix = @{},
+            [hashtable]$Assignments = @{}
+        )
+
+        $Source = [System.IO.File]::ReadAllText($script:ShippingInstallerPath)
+        $Edits = New-Object System.Collections.Generic.List[object]
+
+        foreach ($HomeReference in $script:InstallerAst.FindAll({
+            param ($Node)
+            $Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $Node.VariablePath.UserPath -eq 'HOME'
+        }, $true))
+        {
+            $Edits.Add(@{ Offset = $HomeReference.Extent.StartOffset; Length = $HomeReference.Extent.EndOffset - $HomeReference.Extent.StartOffset; Text = "'$($script:SandboxHome.Replace("'", "''"))'" })
+        }
+
+        foreach ($Name in $FunctionSuffix.Keys)
+        {
+            $Function = $script:InstallerAst.Find({
+                param ($Node)
+                $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name
+            }, $true)
+            if ($null -eq $Function) { throw "Missing function: $Name" }
+            $Edits.Add(@{ Offset = $Function.Body.Extent.EndOffset - 1; Length = 0; Text = $FunctionSuffix[$Name] })
+        }
+
+        foreach ($Name in $Assignments.Keys)
+        {
+            $Assignment = $script:InstallerAst.Find({
+                param ($Node)
+                $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $Node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $Node.Left.VariablePath.UserPath -eq $Name
+            }, $true)
+            if ($null -eq $Assignment) { throw "Missing assignment: $Name" }
+            $Edits.Add(@{ Offset = $Assignment.Right.Extent.StartOffset; Length = $Assignment.Right.Extent.EndOffset - $Assignment.Right.Extent.StartOffset; Text = $Assignments[$Name] })
+        }
+
+        foreach ($Edit in ($Edits | Sort-Object -Property { $_.Offset } -Descending))
+        {
+            $Source = $Source.Remove($Edit.Offset, $Edit.Length).Insert($Edit.Offset, $Edit.Text)
+        }
+
+        $VariantPath = Join-Path $TestDrive "installer-$([guid]::NewGuid().ToString('N')).ps1"
+        Write-Utf8File -Path $VariantPath -Content $Source
+        return $VariantPath
+    }
+
+    $script:InstallerPath = New-InstallerTestVariant
 }
 
 Describe 'PowerShell syntax' {
@@ -299,6 +354,27 @@ Describe 'Model input and recommendation' {
                     -PreviewMap @{})
 
             $Fallback | Should -Be @($Review.recommended)
+        }
+    }
+
+    It 'uses ordinal recommendation tie-breaks on every PowerShell edition' {
+        $Expected = @('GPT-5.6 A-B', 'GPT-5.6 A.B', 'GPT-5.6 AB')
+
+        @(Get-RecommendedModelSet -Catalog $Expected -MaximumCount 3) | Should -Be $Expected
+    }
+
+    It 'does not let current culture select a different recommended model' {
+        $OriginalCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        $Accented = 'GPT-5.6 ' + [char]0x00E9 + 'clair'
+
+        try
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US')
+            @(Get-RecommendedModelSet -Catalog @($Accented, 'GPT-5.6 Zed') -MaximumCount 1) | Should -Be @('GPT-5.6 Zed')
+        }
+        finally
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $OriginalCulture
         }
     }
 
@@ -727,6 +803,40 @@ Describe 'Atomic file writes' {
             $Snapshot.Existed | Should -BeFalse
             $Snapshot.Bytes | Should -BeNullOrEmpty
         }
+
+        It 'does not rewrite a snapshot whose bytes and attributes are already restored' {
+            $Path = Join-Path $TestDrive 'unchanged-snapshot.bin'
+            [System.IO.File]::WriteAllBytes($Path, [byte[]](0, 255, 1))
+            [System.IO.File]::SetLastWriteTimeUtc($Path, [datetime]'2020-01-01T00:00:00Z')
+            $Snapshot = Get-FileStateSnapshot -Path $Path
+            $Timestamp = [System.IO.File]::GetLastWriteTimeUtc($Path)
+
+            Restore-FileStateSnapshot -Snapshot $Snapshot
+
+            [System.IO.File]::GetLastWriteTimeUtc($Path) | Should -Be $Timestamp
+        }
+
+        It 'never falls back to truncating a live file when atomic rollback is blocked' {
+            $Path = Join-Path $script:WriteTestRoot 'restore-locked.bin'
+            [System.IO.File]::WriteAllBytes($Path, [byte[]](0, 255, 1))
+            $Snapshot = Get-FileStateSnapshot -Path $Path
+            [System.IO.File]::WriteAllBytes($Path, [byte[]](2, 3, 4))
+            $Attributes = [System.IO.File]::GetAttributes($Path)
+            $Handle = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+
+            try
+            {
+                { Restore-FileStateSnapshot -Snapshot $Snapshot } | Should -Throw '*Atomic replacement failed*'
+            }
+            finally
+            {
+                $Handle.Dispose()
+            }
+
+            [System.IO.File]::ReadAllBytes($Path) | Should -Be @(2, 3, 4)
+            [System.IO.File]::GetAttributes($Path) | Should -Be $Attributes
+            @(Get-ChildItem -LiteralPath $script:WriteTestRoot -File).Count | Should -Be 1
+        }
     }
 
     Context 'Strict UTF-8 reads' {
@@ -915,6 +1025,64 @@ Describe 'Generated agent policy' {
         # Wave 2 cannot happen at all unless the reviewers are reachable from the coordinator, so the
         # allowlist is the load-bearing half of the whole two-wave design.
         $Coordinator | Should -Match "agents: \['Claude Opus 5 Expert', 'GPT-5\.6 Sol Expert', 'Claude Opus 5 Reviewer', 'GPT-5\.6 Sol Reviewer'\]"
+    }
+
+    Context 'Delegation boundaries' {
+        BeforeAll {
+            $script:PolicyExpert = New-ExpertAgentContent -AgentName 'Claude Opus 5 Expert' -ModelName 'Claude Opus 5' `
+                -LensTitle 'Implementation and correctness' -LensFocus @('root cause analysis') `
+                -ReviewerNames @('GPT-5.6 Sol Reviewer') -CoordinatorName 'Multi-Model Engineering Council' -CrossModelReview $true
+            $Map = @($script:ExpertMap | Select-Object *)
+            $Map[0] | Add-Member -NotePropertyName ModelFallback -NotePropertyValue @('Fallback Model') -Force
+            $script:PolicyCoordinator = New-CoordinatorAgentContent -AgentName 'Multi-Model Engineering Council' `
+                -ModelName 'Claude Opus 5' -ExpertMap $Map -CrossModelReview $true
+            $script:PolicyReviewer = New-ReviewerAgentContent -AgentName 'GPT-5.6 Sol Reviewer' -ModelName 'GPT-5.6 Sol'
+        }
+
+        It 'carries task scope and tool restrictions into every reviewer brief' {
+            foreach ($Text in @($script:PolicyExpert, $script:PolicyCoordinator))
+            {
+                $Text | Should -Match 'approved repository roots, permitted tools, hard constraints, compatibility requirements, and non-goals'
+            }
+            $script:PolicyReviewer | Should -Match 'If authorized scope cannot be established, return Cannot assess'
+        }
+
+        It 'honors explicitly assigned risks within the approved scope' {
+            $script:PolicyExpert | Should -Match 'Explicitly assigned risks within the approved scope are also your responsibility'
+        }
+
+        It 'fails closed on contradictory or incomplete reviewer directives' {
+            $script:PolicyExpert | Should -Match 'duplicate or conflicting directive blocks'
+            $script:PolicyExpert | Should -Match 'unknown mode'
+            $script:PolicyExpert | Should -Match 'missing or NONE target'
+            $script:PolicyExpert | Should -Match 'SKIP always means zero reviewer calls'
+        }
+
+        It 'respects stop questions and does not infer branch status from a missing report' {
+            $script:PolicyCoordinator | Should -Not -Match 'A question is a DETOUR\.'
+            $script:PolicyCoordinator | Should -Match 'A stop or pause request takes precedence over grammatical form'
+            $script:PolicyCoordinator | Should -Match 'A missing report means the outcome is unknown'
+            $script:PolicyCoordinator | Should -Not -Match 'whose report you cannot see never returned'
+        }
+
+        It 'does not claim configured model labels prove runtime independence' {
+            foreach ($Text in @($script:PolicyExpert, $script:PolicyCoordinator, $script:PolicyReviewer))
+            {
+                $Text | Should -Match 'preferences, not verified runtime model identities'
+                $Text | Should -Match 'including reviewers with a single model value'
+            }
+            $script:PolicyExpert | Should -Not -Match 'the critique is genuinely independent'
+            $script:PolicyCoordinator | Should -Match 'Configured fallbacks: Fallback Model'
+        }
+
+        It 'includes capability in the exact expert report schema' {
+            $script:PolicyExpert | Should -Match '(?s)## Output.*?Open with this exact block:.*?    CAPABILITY:'
+        }
+
+        It 'keeps execution attribution and single-model scheduling consistent' {
+            $script:PolicyCoordinator | Should -Not -Match 'the testing expert ran Y'
+            $script:PolicyCoordinator | Should -Match 'single-model Tier 3 fallback is explicitly sequential'
+        }
     }
 
     It 'rejects an agent whose tool list drifted from the expectation' {
@@ -1280,6 +1448,91 @@ Describe 'End-to-end workspace install' {
         $Coordinator | Should -Match ([regex]::Escape($UnicodeModel))
     }
 
+    It 'applies aliases before creating identities and collapses converging aliases' {
+        $Variant = New-InstallerTestVariant -Assignments @{
+            ModelAliasMap = "@{ 'Retired Model' = 'Current Model'; 'Retired Coordinator' = 'Current Coordinator' }"
+        }
+
+        & $Variant -Scope Workspace -WorkspacePath $script:InstallTestRoot -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting `
+            -Models 'Retired Model', 'Current Model' -CoordinatorModel 'Retired Coordinator' | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        @(Get-ChildItem -LiteralPath $AgentDirectory -Filter '*.agent.md').Count | Should -Be 3
+        Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-expert-current-model.agent.md') | Should -Match '(?m)^model: "Current Model"\r?$'
+        Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-reviewer-current-model.agent.md') | Should -Match '(?m)^model: "Current Model"\r?$'
+        Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md') | Should -Match '(?m)^model: "Current Coordinator"\r?$'
+    }
+
+    It 'checks policy against the primary model that an alias will emit' {
+        $Variant = New-InstallerTestVariant -Assignments @{
+            ModelAliasMap = "@{ 'Retired Model' = 'Current Model' }"
+        }
+        $PolicyPath = Join-Path $script:InstallTestRoot 'policy.json'
+        Write-Utf8File -Path $PolicyPath -Content '{"blockedModels":["Current Model"]}'
+
+        { & $Variant -Scope Workspace -WorkspacePath $script:InstallTestRoot -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting `
+            -Models 'Retired Model' -PolicyPath $PolicyPath | Out-Null } | Should -Throw '*local policy rejects*'
+
+        Test-Path -LiteralPath (Join-Path $script:InstallTestRoot '.github\agents') | Should -BeFalse
+    }
+
+    It 'uses registry preferences only for otherwise defaulted roles: explicit=<Explicit>' -ForEach @(
+        @{ Explicit = $false; ExpectedModel = 'Pinned Model'; ExpectedCoordinator = 'Pinned Coordinator' }
+        @{ Explicit = $true; ExpectedModel = 'Chosen Model'; ExpectedCoordinator = 'Chosen Coordinator' }
+    ) {
+        $Variant = New-InstallerTestVariant -Assignments @{
+            DefaultModels = "@('Default One', 'Default Two')"
+            RoleModelRegistry = "@{ 'code-investigator' = @{ Preferred = 'Pinned Model' }; 'coordinator' = @{ Preferred = 'Pinned Coordinator' } }"
+        }
+        $Arguments = @{
+            Scope = 'Workspace'; WorkspacePath = $script:InstallTestRoot
+            NonInteractive = $true; SkipUpdateCheck = $true; SkipVSCodeSetting = $true
+            ModelCatalog = @('Default One', 'Default Two', 'Pinned Model', 'Pinned Coordinator')
+        }
+        if ($Explicit)
+        {
+            $Arguments.Models = @('Chosen Model')
+            $Arguments.CoordinatorModel = 'Chosen Coordinator'
+        }
+
+        & $Variant @Arguments | Out-Null
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $ExpertText = Read-Utf8File -Path (Join-Path $AgentDirectory "mm-expert-$(ConvertTo-AgentSlug -Text $ExpectedModel).agent.md")
+        $CoordinatorText = Read-Utf8File -Path (Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md')
+        $ExpertValue = [regex]::Match($ExpertText, '(?m)^model: (.+)\r?$').Groups[1].Value
+        $CoordinatorValue = [regex]::Match($CoordinatorText, '(?m)^model: (.+)\r?$').Groups[1].Value
+        @(ConvertFrom-FrontMatterModelValue -Value $ExpertValue)[0] | Should -BeExactly $ExpectedModel
+        @(ConvertFrom-FrontMatterModelValue -Value $CoordinatorValue)[0] | Should -BeExactly $ExpectedCoordinator
+    }
+
+    It 'preserves a reused coordinator chain unless explicitly overridden: override=<Override>' -ForEach @(
+        @{ Override = $false }
+        @{ Override = $true }
+    ) {
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        $CoordinatorPath = Join-Path $AgentDirectory 'multi-model-engineering-council.agent.md'
+        Write-Utf8File -Path $CoordinatorPath -Content @'
+---
+name: Multi-Model Engineering Council
+model: ['Model One', 'Model Two']
+agents: ['Model One Expert']
+---
+Existing council.
+'@
+        $Arguments = @{
+            Scope = 'Workspace'; WorkspacePath = $script:InstallTestRoot
+            NonInteractive = $true; SkipUpdateCheck = $true; SkipVSCodeSetting = $true
+            ModelCatalog = @('Model One', 'Model Two')
+        }
+        if ($Override) { $Arguments.CoordinatorModel = 'Replacement Model' }
+
+        & $script:InstallerPath @Arguments | Out-Null
+
+        $Expected = if ($Override) { 'model: "Replacement Model"' } else { "model: ['Model One', 'Model Two']" }
+        Read-Utf8File -Path $CoordinatorPath | Should -Match ([regex]::Escape($Expected))
+    }
+
     It 'leaves unchanged agent files untouched on a repeated install' {
         & $script:InstallerPath `
             -Scope Workspace `
@@ -1456,7 +1709,7 @@ Describe 'End-to-end workspace install' {
 
         # Two barriers instead of one is a real latency regression, accepted rather than hidden.
         $Coordinator | Should -Match 'the slowest expert plus the slowest reviewer'
-        $Coordinator | Should -Match 'Tier 5 is the one exception, and only across its two waves'
+        $Coordinator | Should -Match 'Tier 5 adds a barrier only across its two waves'
 
         # The tier that lifts a limit is the one a model could read as lifting the others.
         $Coordinator | Should -Match 'It relaxes no tool, capability, permission, safety, trust-boundary, lens, scope, file-ownership, or destructive-action constraint'
@@ -1625,6 +1878,73 @@ Describe 'End-to-end workspace install' {
         (Read-Utf8File -Path $SettingsPath) | Should -BeExactly $Original
     }
 
+    It 'rolls back a completed write even when the writer then throws: existed=<Existed>' -ForEach @(
+        @{ Existed = $false }
+        @{ Existed = $true }
+    ) {
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        New-Item -Path $AgentDirectory -ItemType Directory -Force | Out-Null
+        $Target = Join-Path $AgentDirectory 'mm-reviewer-claude-opus-5.agent.md'
+        $Original = [byte[]](0, 255, 1)
+        if ($Existed) { [System.IO.File]::WriteAllBytes($Target, $Original) }
+        $Variant = New-InstallerTestVariant -FunctionSuffix @{
+            'Install-AgentFile' = "`n    throw 'Injected post-write failure'`n"
+        }
+
+        { & $Variant -Scope Workspace -WorkspacePath $script:InstallTestRoot -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting -Models 'Claude Opus 5' | Out-Null } |
+            Should -Throw '*Injected post-write failure*'
+
+        if ($Existed)
+        {
+            [System.IO.File]::ReadAllBytes($Target) | Should -Be $Original
+        }
+        else
+        {
+            Test-Path -LiteralPath $Target | Should -BeFalse
+        }
+    }
+
+    It 'preserves a concurrent agent edit instead of claiming read-back bytes as its own' {
+        $Variant = New-InstallerTestVariant -FunctionSuffix @{
+            'Install-AgentFile' = @'
+    if ($FileName -like 'mm-reviewer-*')
+    {
+        [System.IO.File]::WriteAllText($DestinationPath, 'concurrent edit')
+    }
+    else
+    {
+        throw 'Injected later failure'
+    }
+'@
+        }
+
+        { & $Variant -Scope Workspace -WorkspacePath $script:InstallTestRoot -NonInteractive -SkipUpdateCheck -SkipVSCodeSetting -Models 'Claude Opus 5' | Out-Null } |
+            Should -Throw '*Injected later failure*'
+
+        $AgentDirectory = Join-Path $script:InstallTestRoot '.github\agents'
+        Read-Utf8File -Path (Join-Path $AgentDirectory 'mm-reviewer-claude-opus-5.agent.md') | Should -BeExactly 'concurrent edit'
+        Test-Path -LiteralPath (Join-Path $AgentDirectory 'mm-expert-claude-opus-5.agent.md') | Should -BeFalse
+    }
+
+    It 'preserves a concurrent settings re-encoding during rollback' {
+        $SettingsPath = Join-Path $script:InstallTestRoot 'settings.json'
+        Write-Utf8File -Path $SettingsPath -Content '{}'
+        $Variant = New-InstallerTestVariant -FunctionSuffix @{
+            'Install-AgentFile' = @'
+    $CurrentBytes = [System.IO.File]::ReadAllBytes($VSCodeSettingsPath)
+    [System.IO.File]::WriteAllBytes($VSCodeSettingsPath, [byte[]](0xEF, 0xBB, 0xBF) + $CurrentBytes)
+    throw 'Injected after settings re-encoding'
+'@
+        }
+
+        { & $Variant -Scope Workspace -WorkspacePath $script:InstallTestRoot -NonInteractive -SkipUpdateCheck -VSCodeSettingsPath $SettingsPath -Models 'Claude Opus 5' | Out-Null } |
+            Should -Throw '*Injected after settings re-encoding*'
+
+        $CurrentBytes = [System.IO.File]::ReadAllBytes($SettingsPath)
+        $CurrentBytes[0..2] | Should -Be @(0xEF, 0xBB, 0xBF)
+        Read-Utf8File -Path $SettingsPath | Should -Match '"chat.subagents.allowInvocationsFromSubagents": true'
+    }
+
     It 'does not delete stale files through a linked agent directory' {
         $Outside = Join-Path $script:InstallTestRoot 'outside'
         New-Item -Path $Outside -ItemType Directory -Force | Out-Null
@@ -1669,6 +1989,10 @@ Describe 'End-to-end workspace install' {
             # so matching anywhere in the file would condemn this one.
             Label = 'body quotes front matter'
             Text = "# Notes`n`nAn agent file starts like this:`n`nname: My Custom Expert`ntarget: vscode`nuser-invocable: false`n"
+        }
+        @{
+            Label = 'generic worker front matter'
+            Text = "---`nname: Handwritten Expert`ntarget: vscode`nuser-invocable: false`n---`nMy own worker."
         }
     ) {
         $Arguments = @{
@@ -2810,6 +3134,25 @@ Describe 'Role-based model registry' {
             (Import-CouncilPolicy -Path $script:PolicyFile).AllowListDeclared | Should -BeTrue
         }
 
+        It 'rejects ambiguous duplicate policy keys: <Label>' -ForEach @(
+            @{ Label = 'allow list'; Body = '{"allowedModels":[],"allowedModels":["Grok 4.5"]}' }
+            @{ Label = 'block list'; Body = '{"blockedModels":["Grok 4.5"],"blockedModels":[]}' }
+            @{ Label = 'escaped name'; Body = '{"allowedModels":[],"\u0061llowedModels":["Grok 4.5"]}' }
+            @{ Label = 'unknown field'; Body = '{"custom":1,"custom":2}' }
+        ) {
+            $Body | Set-Content -LiteralPath $script:PolicyFile
+
+            { Import-CouncilPolicy -Path $script:PolicyFile } | Should -Throw '*duplicate*'
+        }
+
+        It 'does not confuse nested policy names or string values with duplicate root keys' {
+            '{"allowedModels":["Grok 4.5"],"notes":"allowedModels","custom":{"allowedModels":[]}}' |
+                Set-Content -LiteralPath $script:PolicyFile
+
+            $Policy = Import-CouncilPolicy -Path $script:PolicyFile
+            (Test-ModelPolicyDecision -Policy $Policy -Name 'Grok 4.5').Allowed | Should -BeTrue
+        }
+
         It 'rejects a policy source URL it would otherwise print or store' -ForEach @(
             @{ Label = 'a non-https scheme'; Url = 'http://example.invalid/policy' }
             @{ Label = 'a local file scheme'; Url = 'file:///C:/policy.txt' }
@@ -3009,17 +3352,20 @@ Describe 'Uninstall' {
         {
             param ([string]$Path, [string]$Name = 'Claude Opus 5 Expert')
 
-            @(
-                '---'
-                'name: ' + $Name
-                'target: vscode'
-                'user-invocable: false'
-                'disable-model-invocation: false'
-                'model: Claude Opus 5'
-                '---'
-                ''
-                'Body text.'
-            ) -join "`r`n" | Set-Content -LiteralPath $Path -Encoding UTF8
+            $ModelName = $Name -replace ' (Expert|Reviewer)$', ''
+
+            if ($Name.EndsWith(' Reviewer'))
+            {
+                $Content = New-ReviewerAgentContent -AgentName $Name -ModelName $ModelName
+            }
+            else
+            {
+                $Content = New-ExpertAgentContent -AgentName $Name -ModelName $ModelName `
+                    -LensTitle 'Implementation and correctness' -LensFocus @('root cause analysis') `
+                    -ReviewerNames @("$ModelName Reviewer") -CoordinatorName 'Multi-Model Engineering Council' -CrossModelReview $false
+            }
+
+            Write-Utf8File -Path $Path -Content $Content
         }
 
         function New-TestRoster
@@ -3081,6 +3427,47 @@ Describe 'Uninstall' {
         }
     }
 
+    Context 'Worker ownership signatures' {
+        It 'recognizes generated workers without requiring the newer invocation flag: <Flag>' -ForEach @(
+            @{ Flag = 'absent' }
+            @{ Flag = 'true' }
+            @{ Flag = 'false' }
+        ) {
+            $Content = New-ReviewerAgentContent -AgentName 'Model One Reviewer' -ModelName 'Model One'
+            $Content = if ($Flag -eq 'absent') {
+                $Content -replace '(?m)^disable-model-invocation: false\r?\n', ''
+            } else {
+                $Content.Replace('disable-model-invocation: false', "disable-model-invocation: $Flag")
+            }
+            $Path = Join-Path $script:UninstallRoot 'mm-reviewer-model-one.agent.md'
+            Write-Utf8File -Path $Path -Content $Content
+
+            Test-OwnedAgentFile -Path $Path | Should -BeTrue
+        }
+
+        It 'rejects ambiguous worker headers: <Label>' -ForEach @(
+            @{ Label = 'duplicate bare key'; Insert = "user-invocable: true`n" }
+            @{ Label = 'duplicate quoted key'; Insert = "`"user-invocable`": true`n" }
+            @{ Label = 'Unicode line separator'; Insert = ('name: Other Reviewer' + [char]0x2028) }
+        ) {
+            $Content = New-ReviewerAgentContent -AgentName 'Model One Reviewer' -ModelName 'Model One'
+            $Content = $Content.Replace('target: vscode', ($Insert + "`n" + 'target: vscode'))
+            $Path = Join-Path $script:UninstallRoot 'mm-reviewer-ambiguous.agent.md'
+            Write-Utf8File -Path $Path -Content $Content
+
+            Test-OwnedAgentFile -Path $Path | Should -BeFalse
+        }
+
+        It 'requires the class-specific worker tool signature' {
+            $Content = New-ReviewerAgentContent -AgentName 'Model One Reviewer' -ModelName 'Model One'
+            $Content = $Content.Replace("tools: ['read', 'search', 'web']", "tools: ['read', 'edit']")
+            $Path = Join-Path $script:UninstallRoot 'mm-reviewer-other-tools.agent.md'
+            Write-Utf8File -Path $Path -Content $Content
+
+            Test-OwnedAgentFile -Path $Path | Should -BeFalse
+        }
+    }
+
     Context 'Removal engine' {
 
         It 'removes the whole roster including the coordinator' {
@@ -3139,6 +3526,24 @@ Describe 'Uninstall' {
                 -CoordinatorAgentName $script:CoordinatorName 6>$null
 
             Get-Content -LiteralPath $Bystander -Raw | Should -Match 'Untouched'
+        }
+
+        It 'preserves a replacement made while an uninstall backup is being created' {
+            $Target = Join-Path $script:UninstallAgents 'mm-expert-claude-opus-5.agent.md'
+            New-TestWorker -Path $Target
+            Mock Backup-ExistingFile {
+                param ($Path, $BackupDirectory)
+                [System.IO.Directory]::CreateDirectory($BackupDirectory) | Out-Null
+                [System.IO.File]::Copy($Path, (Join-Path $BackupDirectory 'original.agent.md'))
+                [System.IO.File]::WriteAllText($Path, 'concurrent replacement')
+            }
+
+            $Result = Remove-CouncilAgentFile -AgentDirectory $script:UninstallAgents -BackupDirectory $script:UninstallBackups `
+                -CoordinatorFileName $script:CoordinatorFile -CoordinatorAgentName $script:CoordinatorName 6>$null
+
+            $Result.Removed.Count | Should -Be 0
+            $Result.Skipped.Count | Should -Be 1
+            Read-Utf8File -Path $Target | Should -BeExactly 'concurrent replacement'
         }
 
         It 'keeps a recoverable copy of every file it removes' {

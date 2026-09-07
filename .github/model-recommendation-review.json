@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "reviewedOn": "2026-09-02",
+  "reviewedOn": "2026-09-07",
   "source": "One designated high-access VS Code profile's local model cache. This is a maintainer reference, not an entitlement guarantee for other users.",
-  "catalogCount": 24,
+  "catalogCount": 26,
   "catalog": [
     {
       "name": "Auto",
@@ -60,6 +60,11 @@
       "isPreview": false
     },
     {
+      "name": "Gemini 3.8 Flash",
+      "category": "versatile",
+      "isPreview": false
+    },
+    {
       "name": "GPT-5 mini",
       "category": "lightweight",
       "isPreview": false
@@ -105,6 +110,11 @@
       "isPreview": false
     },
     {
+      "name": "GPT-6 Astra",
+      "category": "powerful",
+      "isPreview": false
+    },
+    {
       "name": "Grok 4.5",
       "category": "versatile",
       "isPreview": false
@@ -127,9 +137,9 @@
   ],
   "recommended": [
     "Claude Opus 5",
-    "GPT-5.6 Sol",
+    "GPT-6 Astra",
     "GPT-5.3-Codex",
-    "Gemini 3.7 Flash",
+    "Gemini 3.8 Flash",
     "Grok 4.6"
   ]
 }

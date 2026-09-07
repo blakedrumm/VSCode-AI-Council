@@ -19,7 +19,7 @@
 
 ## What this is
 
-One model reviewing its own work will confidently repeat its own blind spots. This installer wires up a council of agents that run on **different models from different vendors**, each with a distinct review lens, so a second opinion is genuinely independent rather than an echo.
+One model reviewing its own work can repeat its own blind spots. This installer configures a council of agents with **different model preferences and review lenses**. Different providers are preferred, but configured names do not prove independent training lineages or which model VS Code actually runs.
 
 It installs a single agent you select in Copilot Chat. That coordinator decides for itself how much horsepower a question deserves, from answering directly at zero cost up to fanning out to five experts in parallel.
 
@@ -57,7 +57,7 @@ Reviewers cannot invoke subagents, which caps nesting at two levels. A recursion
 
 Workers use `user-invocable: false` and `disable-model-invocation: false`: they stay out of the agent picker while remaining available through the coordinator's explicit allowlist. The coordinator sets `disable-model-invocation: true`, which keeps it out of general subagent selection. VS Code documents that naming an agent in an explicit `agents` list overrides that flag, so this is protection from implicit recruitment rather than an absolute lock.
 
-Each expert may consult at most one reviewer, exactly once, and never its own when multiple models are configured. Tier 3 requires that review and Tier 4 authorizes it only for a branch with a material unresolved claim. Tier 5 works differently: its experts get no nested review at all, and the coordinator invokes the reviewers itself afterwards. With more than one model configured, an expert running Claude can only be challenged by a reviewer running something other than Claude.
+Each expert may consult at most one reviewer, exactly once, and never its own configured seat when multiple models are configured. Tier 3 requires that review and Tier 4 authorizes it only for a branch with a material unresolved claim. Tier 5 works differently: its experts get no nested review at all, and the coordinator invokes the reviewers itself afterwards. A different configured seat can still share a family, fallback, or runtime route; model independence remains unverified unless the runtime model families were actually verified.
 
 Reviewer briefs are anonymized. Whoever writes one, an expert for its own nested review or the coordinator for a Tier 5 second wave, may not name the model, the vendor, or the lens behind the position under attack, and labels the positions `Position A` and `Position B` instead. The lens is included because position in the model list is what assigns it, so naming the lens would name the model. The identity map stays with the coordinator, which still needs it to pick a different-model reviewer and to attribute stances to named experts in the final answer. This is bias reduction rather than a confidentiality boundary, and a reviewer that recognizes a writing style has broken nothing.
 
@@ -65,18 +65,20 @@ If you configure only one model, the council adapts rather than pretending other
 
 ## The six tiers
 
-The coordinator classifies each request once and picks the cheapest strategy that can still produce a defensible answer. It announces the tier and the question each expert was asked before it dispatches anything, so a fan out never looks like a frozen session.
+The coordinator starts with the cheapest strategy that can produce a defensible answer and changes tier only when new evidence justifies it. It announces the tier and the question each expert was asked before it dispatches anything, so a fan out never looks like a frozen session.
 
 | Tier | Strategy | Cost | When |
 |---|---|---|---|
 | 0 | Direct answer | 0 expert calls | Known facts, single file lookups, trivial local changes. Most questions land here |
 | 1 | One expert | 1 call | The task sits inside a single lens with a small blast radius |
-| 2 | Two experts in parallel | 2 calls | The task spans two lenses, or touches shared code and public behavior |
+| 2 | Two experts in parallel | 2 calls | The task spans two lenses and either involves a real design choice or touches shared code or public behavior |
 | 3 | Adversarial debate | ~4 calls | You asked for a debate, or a disagreement survived that no tool could settle |
 | 4 | Full parallel team | up to 5 expert calls, plus selected reviews | You asked for the full team, or the work spans genuinely independent subsystems |
 | 5 | Exhaustive collaborative review | up to 10 calls in two serial waves | You explicitly asked for an exhaustive review, a brainstorm, a deep review, or an unconstrained one. Wave 1 is independent discovery, one expert per lens, with no nested review. The coordinator then builds a conflict state and aims reviewers at what the experts disagreed on or could not verify |
 
 Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, from spending an expert call on something a single tool call can verify, and from selecting Tier 5 on its own initiative.
+
+With one configured model, Tier 3 uses sequential opposing analyses with fresh-context review, not independent cross-model evidence. With multiple models, independent branches run concurrently; Tier 5's second wave waits for its evidence barrier.
 
 Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won. Tier 5 adds five auditable artifacts on top of it: a collaboration log, a conflict matrix, an evidence ledger, a dissent register, and a list of unresolved risks. Those are Tier 5 only, so the cheaper tiers stay compact.
 
@@ -92,7 +94,7 @@ That section is the coordinator's summary. When you want what an expert actually
 
 ### The five lenses
 
-Position in the model list determines the lens, so parallel experts never duplicate each other. Each lens also carries a stable role identifier. Titles are prose and get reworded; identifiers do not, so a pinned model preference survives an edit to the wording.
+Position in the model list determines the default lens. Explicitly assigned risks within the approved scope are also owned by that expert, even when no default lens names them. Each lens carries a stable role identifier, so a pinned model preference survives an edit to its title.
 
 | Role identifier | Lens | Position |
 |---|---|---|
@@ -110,13 +112,17 @@ Model preferences live in one place, in the script you already downloaded, so th
 
 It ships empty. An empty registry means nothing changes: models still come from `-Models`, the picker, a previous installation, or the built-in defaults.
 
+Explicit command-line choices, picker selections, and accepted reuse take priority. Registry `Preferred` values replace built-in defaults only when none of those selected the role; registry candidates then contribute to its ordered fallback chain. Aliases are resolved before names are deduplicated, policy is checked, and agent identities are generated. Alias cycles are rejected.
+
+The `challenger` entry describes the reviewer class but does not select separate reviewer models. Each reviewer inherits its seat's canonical primary model and has no explicit fallback list.
+
 ### Fallbacks are resolved by VS Code, not by the installer
 
 VS Code accepts a prioritized list in an agent's `model:` field and tries each entry in order until one is available. So a fallback chain is written into the agent file and honoured at run time, which is why the installer never removes an entry for being unavailable. Removing one would duplicate what the platform already does and would make the generated files depend on which machine produced them.
 
 A single model stays a plain value, so an unchanged installation rewrites nothing.
 
-An expert's fallback chain never includes a model another seat already runs. An expert that fell back onto a peer's model could be challenged by that peer's reviewer, which is exactly the echo the council exists to avoid. Reviewers get no fallback for the same reason.
+An expert's explicit fallback chain excludes other seats' configured primary names. This does not exclude shared fallback names, same-family variants, `Auto` routing, or VS Code's own substitution. Reviewers have a single configured model value, which also does not prove runtime identity. The generated roles disclose this limit and prefer eligible reviewers from a known different family without treating unfamiliar names as evidence of lineage.
 
 ### What the installer can and cannot see
 
@@ -148,6 +154,8 @@ Pass `-PolicyPath` to load a JSON file:
 
 Without the switch, no policy file is opened at all, which is what keeps a stock installation organization-neutral. A blocked model always loses. A declared but empty `allowedModels` permits nothing, because a present-but-empty list is a real policy rather than the absence of one. `sourceUrl` must be a plain https URL; it is recorded and displayed and is never fetched.
 
+Duplicate root keys are rejected, including escaped or case-variant spellings. Allowed and blocked names are checked after alias resolution so a rename cannot bypass an explicit denial.
+
 This constrains what the installer writes and nothing else. It is user-supplied and unverified, it does not control which model VS Code ultimately runs, and it is not a compliance determination. Confirm requirements with your organization.
 
 ### Renames and deprecation
@@ -161,6 +169,8 @@ This constrains what the installer writes and nothing else. It is user-supplied 
 ```
 
 A maintainer tool, report-only, and not a switch on the installer. It reports model identifiers referenced outside the registry, matching only names the registry already knows so ordinary English does not flood the output. Add `-FailOnFinding` for CI, `-IncludeChangelog` to include history, and `-ApplyAliases` to rewrite recorded renames after taking a backup.
+
+PowerShell updates are limited to parsed constant string literals, not comments or executable command names. The installer registry is reported but never rewritten. Alias values are encoded as string data; unparsable PowerShell is not rewritten. Updates preserve UTF-8 content, BOM choice, and an exact byte backup; existing backups get a unique successor rather than being overwritten. Each changed file is replaced atomically, but the entire multi-file run is not a transaction. Link targets are not traversed.
 
 Before every maintainer push, refresh the recommendation review from the designated high-access
 VS Code profile, inspect the resulting diff, and commit it with the rest of the change:
@@ -199,20 +209,20 @@ For reference, this is the result from one high-access profile. It is evidence t
 was checked, not a promise that every account sees the same catalog:
 
 <!-- model-recommendation-review:start -->
-_Reference example reviewed **September 2, 2026** against one high-access VS Code profile._
+_Reference example reviewed **September 7, 2026** against one high-access VS Code profile._
 
 ```text
   * [6] Claude Opus 5
-  * [11] Gemini 3.7 Flash
-  * [13] GPT-5.3-Codex
-  * [18] GPT-5.6 Sol
-  * [22] Grok 4.6
+  * [12] Gemini 3.8 Flash
+  * [14] GPT-5.3-Codex
+  * [22] GPT-6 Astra
+  * [24] Grok 4.6
     [C] Enter a custom model name
     [R] Use the recommended set marked with *
 ```
 <!-- model-recommendation-review:end -->
 
-The recommendation takes the newest model from each vendor that VS Code publishes as `powerful` or `versatile`. Vendor diversity comes first because a peer review is only independent across training lineages. Models VS Code publishes as `lightweight` are excluded, since a weak entry weakens both its expert seat and its reviewer seat.
+The recommendation takes the newest model from each vendor that VS Code publishes as `powerful` or `versatile`. Vendor diversity is a preference for broader perspectives, not proof of independent runtime models. Models VS Code publishes as `lightweight` are excluded, since a weak entry weakens both its expert seat and its reviewer seat. Ordinal tie-breaks keep the result stable across cultures and both supported PowerShell editions.
 
 Two deliberate constraints:
 
@@ -223,7 +233,7 @@ Avoid `Auto` for experts. It is a router, so two Auto experts can land on the sa
 
 ### Reusing a previous configuration
 
-Re-running the installer detects an existing installation, reads the models and coordinator model back out of the installed coordinator agent, and offers to reuse them. No separate state file, so the offer always reflects what is actually installed.
+Re-running the installer detects an existing installation, reads the primary roster and coordinator model chain from the installed coordinator agent, and offers to reuse them. The coordinator fallback order is preserved unless `-CoordinatorModel` explicitly replaces it. Expert fallback chains are rebuilt from the current registry rather than recovered from worker files; manually edited worker chains are not preserved by this offer.
 
 ## Interruption and resume
 
@@ -234,6 +244,8 @@ If you steer the coordinator mid run, it classifies the interruption instead of 
 - **DETOUR**, a genuine side question, answered before returning to the original job
 
 The run is tracked as a todo list that survives the interruption, and results already in the transcript are reused rather than re-dispatched.
+
+Intent takes precedence over grammar: a stop request phrased as a question still stops the work. A missing report means an unknown outcome, not proof that a branch never ran; the coordinator checks retained results or available status before considering a duplicate invocation.
 
 If you would rather a run finish before your next message is processed, choose **Add to Queue** from the Send dropdown, or set `chat.requestQueuing.defaultAction` to `queue`.
 
@@ -296,9 +308,9 @@ That setting is global. It enables nested subagents for every agent you use, not
 
 The installer does **not** enable global tool auto-approval, and does **not** enable unrestricted recursive agents.
 
-Before activating a roster, the installer validates the exact content it is about to write. Live agent files are changed only after that check passes, and a file whose bytes already match is left alone, so re-running costs nothing and produces no backup churn. A named mutex prevents concurrent installers from interleaving changes, and a failed activation restores the previous agent files and the original nested-subagent setting.
+Before activating a roster, the installer validates the exact content it is about to write. Live agent files are changed only after that check passes, and matching bytes are left alone to avoid write and backup churn. A named mutex prevents concurrent installers from interleaving changes. On failure, rollback uses staged atomic byte writes and restores prior content only when the current bytes still match this run's intended write; detected concurrent edits are preserved and reported. Filesystem locks or a race after comparison can still prevent recovery, so backups remain important.
 
-The repository's Pester suite runs the same behavioral checks on PowerShell 7 and Windows PowerShell 5.1, including non-ASCII model names, settings mutation, generated front matter, deterministic generation, and the Tier 5 two-wave review policy.
+The repository's Pester suite runs the same behavioral checks on PowerShell 7 and Windows PowerShell 5.1, including non-ASCII model names, fault-injected rollback, policy and alias handoffs, scanner byte preservation, generated front matter, deterministic recommendations, and the Tier 5 two-wave review policy. Installer fixtures redirect backup storage into the test sandbox instead of the user's backup history. See the [engineering review](docs/engineering-review.md) for the validated findings and remaining limits.
 
 ## Uninstall
 
@@ -314,7 +326,7 @@ To remove a council installed into one repository:
 .\Install-VSCodeCopilotCouncil-v5.ps1 -Uninstall -Scope Workspace -WorkspacePath 'C:\GitHub\MyProject'
 ```
 
-It lists every file before deleting anything, and removes only files whose front matter identifies them as this installer's, so a hand-written agent that happens to match the naming pattern is left alone. A copy of everything it removes goes to `~/.copilot/agent-backups/v5_<timestamp>` first. Running it twice is harmless, and running it when nothing is installed is a success rather than an error.
+It lists every file before deleting anything and requires a conservative generated-header signature. Worker names, model values, descriptions, and tool sets must agree; generic lookalikes and ambiguous headers are left alone. This is not proof of authorship, and an unfamiliar historical or manually edited header may need manual review. A copy of everything it removes goes to `~/.copilot/agent-backups/v5_<timestamp>` first. Files whose bytes changed after inspection are skipped. Running it twice is harmless, and running it when nothing is installed is a success rather than an error.
 
 Two things are deliberately left behind:
 

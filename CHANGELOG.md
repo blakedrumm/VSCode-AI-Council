@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## Unreleased
+
+### Fixed
+
+- Track intended agent and settings bytes before mutation so a post-write exception can roll back
+  completed work without treating a concurrent edit as this run's output. Restore through staged
+  atomic writes, fail without truncating locked targets, and leave unchanged snapshots untouched.
+- Reject duplicate policy keys, including escaped and case-variant spellings. Resolve aliases before
+  policy checks and generated identities, honor registry defaults, and preserve reused coordinator
+  fallback order unless explicitly overridden.
+- Use ordinal recommendation tie-breaks across PowerShell editions and cultures.
+- Require stronger worker ownership signatures, reject ambiguous headers, and skip uninstall
+  candidates that change while their backup is created.
+- Limit scanner alias updates to parsed PowerShell literals, preserve UTF-8 and exact backup bytes,
+  retain previous backups, and leave the registry and linked paths unchanged.
+
+### Changed
+
+- Carry scope and tool constraints into reviewer briefs, handle malformed review directives, honor
+  stop requests regardless of grammar, and distinguish unknown branch outcomes from unstarted work.
+- State model-routing and independence limits in every generated role, including scalar reviewers;
+  expose configured expert fallback chains without claiming verified runtime identities.
+- Isolate installer test backups from user storage and add fault-injection, scanner, and CI security
+  regressions. CI selects PSGallery explicitly and validation checkout does not retain credentials.
+- Refresh the September 7 high-access reference against 26 cached models. Add GPT-6 Astra and
+  Gemini 3.8 Flash with their observed size categories to the fallback catalog; retain older entries
+  and the unattended default roster. The live reference and fallback now recommend Claude Opus 5,
+  GPT-6 Astra, GPT-5.3-Codex, Gemini 3.8 Flash, and Grok 4.6.
+
 ## 5.18.0
 
 The council could be installed but never removed. The README offered three `Remove-Item` globs that

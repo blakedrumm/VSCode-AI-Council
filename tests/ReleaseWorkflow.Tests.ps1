@@ -1,7 +1,9 @@
 BeforeAll {
+    Set-StrictMode -Version Latest
     $script:RepositoryRoot = Split-Path -Path $PSScriptRoot -Parent
     $script:ReleaseWorkflowPath = Join-Path -Path $script:RepositoryRoot -ChildPath '.github/workflows/release.yml'
     $script:ReleaseWorkflow = [System.IO.File]::ReadAllText($script:ReleaseWorkflowPath)
+    $script:ValidateWorkflow = [System.IO.File]::ReadAllText((Join-Path $script:RepositoryRoot '.github/workflows/validate.yml'))
 
     # Parsed by indentation rather than with a YAML module, so the suite gains no dependency that
     # CI would then have to pin.
@@ -54,6 +56,30 @@ Describe 'Release workflow structure' {
         $Block | Should -Match '(?m)^\s*contents: read\s*$'
         $Block | Should -Not -Match '(?m)^\s*contents: write\s*$'
         $Block | Should -Not -Match 'secrets\.'
+    }
+
+    It 'disables persisted checkout credentials in both workflows' {
+        foreach ($Workflow in @($script:ReleaseWorkflow, $script:ValidateWorkflow))
+        {
+            $Workflow | Should -Match '(?m)uses: actions/checkout@[^\r\n]+\r?\n\s+with:\r?\n(?:\s+[^\r\n]+\r?\n)*?\s+persist-credentials: false'
+        }
+    }
+
+    It 'selects PSGallery explicitly for every CI module installation' {
+        foreach ($Workflow in @($script:ReleaseWorkflow, $script:ValidateWorkflow))
+        {
+            $Installs = [regex]::Matches($Workflow, '(?m)^\s*Install-Module[^\r\n]+')
+            $Installs.Count | Should -BeGreaterThan 0
+            foreach ($Install in $Installs)
+            {
+                $Install.Value | Should -Match '-Repository PSGallery(?:\s|$)'
+            }
+        }
+    }
+
+    It 'keeps SFTP token permissions empty and serializes release publication' {
+        script:Get-JobBlock -Name 'publish_sftp' | Should -Match '(?m)^\s*permissions: \{\}\s*$'
+        $script:ReleaseWorkflow | Should -Match '(?m)^\s*cancel-in-progress: false\s*$'
     }
 
     It 'publishes without checking out or executing repository code' {

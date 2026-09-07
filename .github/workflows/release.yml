@@ -179,7 +179,7 @@ jobs:
             throw "The installer has $($parseErrors.Count) parse error(s)."
           }
 
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+          Install-Module PSScriptAnalyzer -Repository PSGallery -RequiredVersion 1.25.0 -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
           $findings = Invoke-ScriptAnalyzer -Path $scriptPath -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
           $findings += Invoke-ScriptAnalyzer -Path './.github/scripts' -Recurse -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
           $findings += Invoke-ScriptAnalyzer -Path './tests' -Recurse -Settings './PSScriptAnalyzerSettings.psd1' -Severity Error, Warning
@@ -230,7 +230,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Install-Module Pester -RequiredVersion 6.0.1 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+          Install-Module Pester -Repository PSGallery -RequiredVersion 6.0.1 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
           Import-Module Pester -RequiredVersion 6.0.1 -Force
           Invoke-Pester -Path './tests' -CI -Output Detailed
 
@@ -239,7 +239,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Install-Module Pester -RequiredVersion 6.0.1 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+          Install-Module Pester -Repository PSGallery -RequiredVersion 6.0.1 -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
           Import-Module Pester -RequiredVersion 6.0.1 -Force
           Invoke-Pester -Path './tests' -CI -Output Detailed
 
