@@ -143,3 +143,72 @@ Describe 'Release workflow structure' {
         }
     }
 }
+
+Describe 'Weekly model workflow structure' {
+    BeforeAll {
+        $script:ModelWorkflow = [System.IO.File]::ReadAllText((Join-Path $script:RepositoryRoot '.github/workflows/update-models.yml'))
+    }
+
+    It 'runs weekly and on demand, not from untrusted pull requests' {
+        $script:ModelWorkflow | Should -Match "cron: '23 9 \* \* 1'"
+        $script:ModelWorkflow | Should -Match '(?m)^  workflow_dispatch:'
+        $script:ModelWorkflow | Should -Not -Match 'pull_request|pull_request_target'
+        $script:ModelWorkflow | Should -Match 'github\.ref == format'
+        $script:ModelWorkflow | Should -Match 'cancel-in-progress: false'
+    }
+
+    It 'checks real public data then tests both supported PowerShell editions' {
+        $script:ModelWorkflow | Should -Match 'Update-ModelRecommendation\.ps1 -Source GitHubDocs -Update'
+        $script:ModelWorkflow | Should -Match 'Update-ModelRecommendation\.ps1 -Source GitHubDocs\r?\n'
+        $script:ModelWorkflow | Should -Match 'shell: powershell'
+        $script:ModelWorkflow | Should -Match 'shell: pwsh'
+        @([regex]::Matches($script:ModelWorkflow, "Invoke-Pester -Path './tests' -CI")).Count | Should -Be 2
+        $script:ModelWorkflow | Should -Match 'Invoke-ScriptAnalyzer'
+        $script:ModelWorkflow | Should -Not -Match 'AllowReferenceContraction'
+    }
+
+    It 'separates validation from publication and does not run the candidate with write credentials' {
+        $Refresh = [regex]::Match($script:ModelWorkflow, '(?s)  refresh:.*?(?=\r?\n  publish:)').Value
+        $Publish = [regex]::Match($script:ModelWorkflow, '(?s)  publish:.*').Value
+        $Refresh | Should -Match 'contents: read'
+        $Refresh | Should -Match 'persist-credentials: false'
+        $Refresh | Should -Not -Match 'contents: write|GH_TOKEN|secrets\.'
+        $Publish | Should -Match 'needs: refresh'
+        $Publish | Should -Match "if: needs.refresh.outputs.changed == 'true'"
+        $Publish | Should -Match 'contents: write'
+        $Publish | Should -Not -Match 'actions/checkout|Import-Module|Invoke-Expression|\.github/scripts/'
+    }
+
+    It 'publishes only the allowed files without overwriting concurrent commits' {
+        $script:ModelWorkflow | Should -Match 'Unexpected changed file'
+        $script:ModelWorkflow | Should -Match 'Unexpected artifact contents'
+        $script:ModelWorkflow | Should -Match '\$head\.object\.sha -cne \$env:SOURCE_COMMIT'
+        $script:ModelWorkflow | Should -Match 'force = \$false'
+        $script:ModelWorkflow | Should -Not -Match '--force|force = \$true'
+        $script:ModelWorkflow | Should -Match 'include-hidden-files: true'
+    }
+
+    It 'pins actions and module installations' {
+        foreach ($Use in [regex]::Matches($script:ModelWorkflow, '(?m)^\s*uses:\s*(?<ref>[^\s#]+)'))
+        {
+            $Use.Groups['ref'].Value | Should -Match '@[0-9a-f]{40}$'
+        }
+        foreach ($Install in [regex]::Matches($script:ModelWorkflow, '(?m)^\s*Install-Module[^\r\n]+'))
+        {
+            $Install.Value | Should -Match '-Repository PSGallery(?:\s|$)'
+            $Install.Value | Should -Match '-RequiredVersion [0-9]+\.[0-9]+\.[0-9]+'
+        }
+    }
+
+    It 'contains syntactically valid PowerShell in every inline step' {
+        $Steps = [regex]::Matches($script:ModelWorkflow, '(?m)^        run: \|\r?\n(?<Body>(?:^          [^\r\n]*\r?\n|^\r?\n)+)')
+        $Steps.Count | Should -Be 6
+        foreach ($Step in $Steps)
+        {
+            $Tokens = $null
+            $Errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($Step.Groups['Body'].Value, [ref]$Tokens, [ref]$Errors)
+            @($Errors).Count | Should -Be 0 -Because (@($Errors | ForEach-Object { $_.Message }) -join '; ')
+        }
+    }
+}

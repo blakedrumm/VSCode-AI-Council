@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The version in `$ScriptVersion` is what the built-in update check compares, so it is the value that
 decides whether users are told an update exists.
 
+## 5.20.0
+
+### Added
+
+- Explicitly sized council teams: requests such as "bring in 12 agents" or "devise a team of
+  20 agents" reuse configured experts with fresh contexts, distinct worker/task IDs, bounded
+  batches, and duplicate-safe resume tracking. The requested total excludes the coordinator
+  but includes reviewers, retries, and replacements. Ordinary tier limits remain unchanged.
+- Weekly GitHub Actions model refresh on Mondays at 09:23 UTC, with manual dispatch. Official
+  GitHub model tables are read at one source commit; newer versions of reviewed families inherit
+  their reviewed categories, unfamiliar families require review, and published retirements are
+  handled automatically. Failed source checks or tests leave the default branch unchanged.
+- Separate read-only validation and write-only publication jobs. Both supported PowerShell
+  editions and static analysis run before a narrowly scoped, non-force update of the three
+  recommendation files. Concurrent default-branch changes abort publication.
+
+### Changed
+
+- Refresh the October 1 recommendation to Claude Opus 5.5, GPT-6.1 Sol, GPT-5.3-Codex,
+  Gemini 3.8 Flash, and Grok 4.7, verified against the local cache and official public tables.
+- The maintainer updater now refreshes embedded fallback models, categories, and the unattended
+  default pair as well as the reference, date, and README. It remembers the source and remains
+  read-only without `-Update`; identical results are not restamped.
+- Explicit team counts take precedence over implicit nested-review and retry budgets without
+  granting additional tools, scope, edit rights, recursion, or platform capacity. Exhaustive
+  teams split their count across discovery and review; partial or unavailable work is disclosed.
+
 ## 5.19.0
 
 This release also includes the previously unpublished 5.18.0 changes: supported uninstall,

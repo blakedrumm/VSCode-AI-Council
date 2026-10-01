@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.19.0-blue" alt="Version 5.19.0">
+  <img src="https://img.shields.io/badge/version-5.20.0-blue" alt="Version 5.20.0">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE" alt="PowerShell 5.1 and 7+">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows">
@@ -21,7 +21,7 @@
 
 One model reviewing its own work can repeat its own blind spots. This installer configures a council of agents with **different model preferences and review lenses**. Different providers are preferred, but configured names do not prove independent training lineages or which model VS Code actually runs.
 
-It installs a single agent you select in Copilot Chat. That coordinator decides for itself how much horsepower a question deserves, from answering directly at zero cost up to fanning out to five experts in parallel.
+It installs a single agent you select in Copilot Chat. By default, that coordinator decides how much horsepower a question deserves, from answering directly at zero expert cost up to fanning out to five experts. Explicitly request a team of any positive number of agents to expand it beyond that default roster.
 
 <p align="center">
   <img src="docs/content.png" alt="Coordinator agent delegating to specialist agents that cross-check each other" width="900">
@@ -61,7 +61,7 @@ Each expert may consult at most one reviewer, exactly once, and never its own co
 
 Reviewer briefs are anonymized. Whoever writes one, an expert for its own nested review or the coordinator for a Tier 5 second wave, may not name the model, the vendor, or the lens behind the position under attack, and labels the positions `Position A` and `Position B` instead. The lens is included because position in the model list is what assigns it, so naming the lens would name the model. The identity map stays with the coordinator, which still needs it to pick a different-model reviewer and to attribute stances to named experts in the final answer. This is bias reduction rather than a confidentiality boundary, and a reviewer that recognizes a writing style has broken nothing.
 
-If you configure only one model, the council adapts rather than pretending otherwise. Tiers 2 and 4 need a second model, so they are marked unavailable. The reviewer still runs, but it is a fresh-context self-critique rather than independent corroboration, and the generated prompts say so.
+If you configure only one model, the council adapts rather than pretending otherwise. Default Tiers 2 and 4 need a second model, so they are marked unavailable. An explicitly sized team can still reuse that model with distinct briefs. Repeated use of one model is fresh-context analysis rather than independent cross-model corroboration, and the generated prompts say so.
 
 ## The six tiers
 
@@ -79,6 +79,37 @@ The coordinator starts with the cheapest strategy that can produce a defensible 
 Tiers 3, 4, and 5 are exceptions rather than defaults. The coordinator is explicitly forbidden from fanning out to look busy, from spending an expert call on something a single tool call can verify, and from selecting Tier 5 on its own initiative.
 
 With one configured model, Tier 3 uses sequential opposing analyses with fresh-context review, not independent cross-model evidence. With multiple models, independent branches run concurrently; Tier 5's second wave waits for its evidence barrier.
+
+### Expand the council on request
+
+Ask, for example:
+
+> Bring in 12 agents to investigate this issue.
+>
+> Devise a team of 20 agents to work on this migration.
+>
+> Use 8 agents for an exhaustive review of this change.
+
+The requested number counts **worker invocations, excluding the coordinator**. Reviews, retries,
+and replacements share that same total; they are not hidden extra calls. For an exhaustive review,
+the coordinator allocates the total between discovery and review before dispatch. One worker cannot
+also provide a second independent review, and the council must disclose that limit.
+
+The one-to-five configured models are reusable agent definitions, not a worker-count ceiling.
+Each invocation gets a fresh context, a unique worker/task ID, a distinct brief, and tracked status.
+The coordinator uses bounded batches when the runtime cannot run the entire team concurrently.
+More workers do not imply more distinct models or independent training lineages.
+
+Only an actual user request authorizes expansion. A quoted instruction or a number found in a file
+does not. Zero, negative, fractional, or ambiguous counts need clarification; asking only for a team
+plan does not launch workers. Later instructions such as "make it 8" or "add 2 more" preserve completed
+work and adjust the remaining allocation instead of restarting the team.
+
+Runtime quotas and permissions still apply. The council reports blocked or missing workers, never
+silently truncates a requested team to five, and never claims undispatched work is complete. If the
+scope cannot support that many useful distinct briefs, it asks about the allocation instead of
+padding the team. Workers remain read-only, the coordinator owns edits, and recursive depth stays
+bounded. These are generated prompt rules, not a scheduler or a guarantee of platform capacity.
 
 Every answer above Tier 0 carries a **Council deliberation** section reporting what the experts agreed on, where they conflicted, and the specific evidence that settled each conflict. Conflicts are never settled by counting votes or by naming which model won. Tier 5 adds five auditable artifacts on top of it: a collaboration log, a conflict matrix, an evidence ledger, a dissent register, and a list of unresolved risks. Those are Tier 5 only, so the cheaper tiers stay compact.
 
@@ -172,51 +203,86 @@ A maintainer tool, report-only, and not a switch on the installer. It reports mo
 
 PowerShell updates are limited to parsed constant string literals, not comments or executable command names. The installer registry is reported but never rewritten. Alias values are encoded as string data; unparsable PowerShell is not rewritten. Updates preserve UTF-8 content, BOM choice, and an exact byte backup; existing backups get a unique successor rather than being overwritten. Each changed file is replaced atomically, but the entire multi-file run is not a transaction. Link targets are not traversed.
 
-Before every maintainer push, refresh the recommendation review from the designated high-access
-VS Code profile, inspect the resulting diff, and commit it with the rest of the change:
+Before every maintainer push, refresh the recommendation review, inspect the resulting diff,
+and commit it with the rest of the change. The maintenance tool needs the pinned YAML parser;
+the standalone installer does not:
 
 ```powershell
+Install-Module powershell-yaml -Repository PSGallery -RequiredVersion 0.4.12 -Scope CurrentUser
 .\.github\scripts\Update-ModelRecommendation.ps1 -Update
 .\.github\scripts\Update-ModelRecommendation.ps1
 ```
 
-The first command refreshes the dated reference snapshot, the installer review date, and the README
-example, but only when the recommendation actually changed. The second is a read-only gate: it fails
-when the live cache, the checked-in snapshot, the installer date, or the README example disagree.
+The updater uses the source recorded in the reference, currently `GitHubDocs`. With `-Update`, it
+refreshes the embedded fallback catalog and categories, unattended default pair, dated reference,
+and marked README example. Without it, the same command is a read-only agreement gate. Unchanged
+results keep their original date and bytes; a later check does not create a date-only commit.
 
-Agreement with the live cache is what proves the recommendation current, so the gate does not demand
-a same-day stamp. Re-running on a later day re-derives the recommendation from scratch and passes if
-nothing changed, which keeps a push from producing a commit whose only content is a new date. The
-stamp therefore records when the result last changed rather than when someone last ran the check.
+To deliberately re-seed reviewed families from the designated high-access profile, use
+`-Source LocalCache -Update`, then `-Source LocalCache` to verify it. A smaller cache or missing
+recommended model requires explicit `-AllowReferenceContraction` on the update. Do not use a
+lower-access or stale profile to replace the public reference. Switch back with
+`-Source GitHubDocs -Update` after reviewing the result.
 
-CI cannot perform the live half because a GitHub runner has no maintainer VS Code profile, but the
-Pester suite recomputes the checked-in snapshot and confirms that all three tracked representations
-agree. If the reference catalog genuinely shrank, `-Update` refuses to overwrite it until the
-maintainer confirms the loss and adds `-AllowReferenceContraction`; this keeps a lower-access or
-stale profile from silently becoming the public high-access reference.
+### Weekly model updates
+
+[Update Model Recommendations](.github/workflows/update-models.yml) runs every Monday at **09:23 UTC**
+and can also be run manually from GitHub Actions. It downloads GitHub's official model release,
+VS Code support, and retirement YAML tables at one immutable source commit. No Copilot token,
+maintainer cache upload, or self-hosted runner is needed.
+
+The public tables do not publish the VS Code cache's size categories or agent-capability metadata.
+The updater therefore preserves exact reviewed metadata and carries a category forward only to a
+newer numeric version of the same reviewed model family, with explicit public VS Code support.
+It does not guess that a new family is suitable: unfamiliar families are reported for a live-cache
+review. Historical category seeds remain in the reference after retirement so a later successor
+does not lose its reviewed family metadata. A known model missing from the client table retains its reviewed support; explicit
+`vscode: false` overrides it. Preview and retired models are not promoted by this public refresh.
+Inherited categories can become stale if a vendor changes a family's capabilities, so periodic
+live-cache reviews remain important.
+
+Malformed or empty source data, unexplained loss of a recommendation, too few eligible models,
+or failed tests stop publication. Documented retirements are handled automatically. A read-only
+job runs the gate, static analysis, and the full PowerShell 7 and Windows PowerShell 5.1 test suites.
+Only then does a separate write-enabled job commit the three recommendation files to the default
+branch. It does not execute the downloaded candidate or force-push, and refuses to overwrite a
+branch that advanced during validation. Unchanged results produce no commit.
+
+GitHub Actions must be enabled and repository rules must allow this workflow's `GITHUB_TOKEN` to
+update the default branch. Protected branches may require a repository-approved bot or a reviewed
+manual update; the workflow does not bypass protection. GitHub can delay scheduled jobs or disable
+them on inactive repositories, and source failures require maintainer attention. Automation is a
+weekly best-effort refresh, not a real-time availability guarantee. The bot commit does not trigger
+another workflow with `GITHUB_TOKEN`, which is why both test suites run before publication here.
+
+Weekly refreshes update the installer on the default branch. They do not create releases or replace
+previously installed agents. Download the updated installer and rerun it when you want new agents;
+choose the recommended set instead of reusing an older roster.
 
 ### Known limitations
 
 - Discovery reads a local VS Code cache. It is not a Copilot API, it reflects one profile on one machine, and it can be stale.
 - Which model actually answers is decided by VS Code at run time. The installer writes the preference; it cannot observe the outcome.
-- Nothing here detects a deprecation on its own. Lifecycle data is whatever a human recorded.
+- The weekly refresh uses published retirement dates for its public fallback. It does not revoke
+  configured models, rewrite local policies, or populate the optional lifecycle registry.
 
 ## Model selection
 
 The installer reads the model list out of the VS Code model cache, so the picker offers the agent-capable models that cache lists for your profile. That is a local cache rather than an entitlement check, so it can be stale and it cannot confirm what your account, plan, or administrator allows. The recommendation is recalculated from that profile every time: a profile with fewer models gets the strongest eligible set it can see, while a profile whose cache exposes newer frontier models has those models considered automatically.
 
-For reference, this is the result from one high-access profile. It is evidence that the frontier path
-was checked, not a promise that every account sees the same catalog:
+For reference, this is the checked-in recommendation, refreshed from official public model tables
+using categories seeded from a high-access profile. The October 1, 2026 local-cache check produced
+the same five models. Neither source guarantees that every account sees the same catalog:
 
 <!-- model-recommendation-review:start -->
-_Reference example reviewed **September 7, 2026** against one high-access VS Code profile._
+_Reference example reviewed **October 1, 2026** against official GitHub model tables and previously reviewed family metadata._
 
 ```text
-  * [6] Claude Opus 5
-  * [12] Gemini 3.8 Flash
-  * [14] GPT-5.3-Codex
-  * [22] GPT-6 Astra
-  * [24] Grok 4.6
+  * [5] Claude Opus 5.5
+  * [11] Gemini 3.8 Flash
+  * [13] GPT-5.3-Codex
+  * [23] GPT-6.1 Sol
+  * [26] Grok 4.7
     [C] Enter a custom model name
     [R] Use the recommended set marked with *
 ```
@@ -226,7 +292,7 @@ The recommendation takes the newest model from each vendor that VS Code publishe
 
 Two deliberate constraints:
 
-- **Size is read from the model cache, not guessed from the name.** A name like `GPT-5.6 Luna` carries no size hint, and guessing gets it wrong.
+- **Local size is read from the model cache, not guessed from the name.** A name like `GPT-5.6 Luna` carries no size hint, and guessing gets it wrong. The public fallback uses reviewed categories, including explicitly documented inheritance for newer versions of known families.
 - **Version numbers are only compared inside a vendor.** Claude 5.0, Gemini 3.1, and GPT 5.6 use unrelated numbering, so nothing in the code claims one vendor outranks another.
 
 Avoid `Auto` for experts. It is a router, so two Auto experts can land on the same underlying model and the cross review becomes a model reviewing itself. It is fine for the coordinator.
@@ -283,8 +349,8 @@ It reads the latest release tag from GitHub's release metadata. It never downloa
 ```powershell
 # Pick your own roster and coordinator
 .\Install-VSCodeCopilotCouncil-v5.ps1 `
-    -Models 'Claude Opus 5', 'Gemini 3.1 Pro (Preview)', 'GPT-5.6 Sol', 'GPT-5.3-Codex', 'Grok 4.5' `
-    -CoordinatorModel 'Claude Opus 5'
+  -Models 'Claude Opus 5.5', 'GPT-6.1 Sol', 'GPT-5.3-Codex', 'Gemini 3.8 Flash', 'Grok 4.7' `
+  -CoordinatorModel 'Claude Opus 5.5'
 
 # Scope the agents to one repository
 .\Install-VSCodeCopilotCouncil-v5.ps1 -Scope Workspace -WorkspacePath 'C:\GitHub\MyProject'
@@ -340,6 +406,10 @@ A council installed in a repository lives in that repository. A user-scope unins
 Tier 4 runs up to five frontier models in parallel, and a selected nested review can double a branch. Tier 5 runs the full roster in a first wave and then up to one reviewer per model in a second, so a five-model Tier 5 run can use ten calls and return a large synthesis. The ceiling is the same as it was before the second wave existed, but the waves are serial, so a Tier 5 run takes the slowest expert plus the slowest reviewer rather than the slowest single branch. That is precisely why the tier gating exists, and why the coordinator is instructed to start at the lowest tier that can answer correctly. In practice most requests cost zero or one expert call.
 
 Hover a subagent section in the chat response to see the AI credits it used.
+
+An explicitly sized team replaces those default call limits with the requested total. Requesting
+20 agents can consume 20 model invocations, including any budgeted reviews or retries. Batching
+limits simultaneous activity, not the total cost. Only an explicit user count enables this expansion.
 
 The other half of the cost is context, and it is easy to miss because nothing bills you for it directly. Everything attached to the request is re-sent on every turn, so a large file left selected in the editor, or pinned as context, is paid for again each time you send a message and again inside every expert the coordinator dispatches. If a long session starts feeling slow or expensive, deselect large files and start a fresh conversation for a new task.
 
