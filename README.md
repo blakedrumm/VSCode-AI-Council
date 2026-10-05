@@ -275,14 +275,14 @@ using categories seeded from a high-access profile. The October 1, 2026 local-ca
 the same five models. Neither source guarantees that every account sees the same catalog:
 
 <!-- model-recommendation-review:start -->
-_Reference example reviewed **October 1, 2026** against official GitHub model tables and previously reviewed family metadata._
+_Reference example reviewed **October 5, 2026** against official GitHub model tables and previously reviewed family metadata._
 
 ```text
-  * [5] Claude Opus 5.5
-  * [11] Gemini 3.8 Flash
-  * [13] GPT-5.3-Codex
-  * [23] GPT-6.1 Sol
-  * [26] Grok 4.7
+  * [4] Claude Opus 5.5
+  * [8] Gemini 3.8 Flash
+  * [10] GPT-5.3-Codex
+  * [20] GPT-6.1 Sol
+  * [23] Grok 4.7
     [C] Enter a custom model name
     [R] Use the recommended set marked with *
 ```

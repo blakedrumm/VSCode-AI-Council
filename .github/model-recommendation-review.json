@@ -1,17 +1,12 @@
 {
   "schemaVersion": 1,
-  "reviewedOn": "2026-10-01",
+  "reviewedOn": "2026-10-05",
   "source": "Official GitHub docs model tables, filtered to reviewed model families. Categories and existing VS Code support are inherited from the last reviewed cache; new versions require explicit public VS Code support. Not a live cache or entitlement check.",
-  "catalogCount": 27,
+  "catalogCount": 24,
   "catalog": [
     {
       "name": "Claude Haiku 4.5",
       "category": "lightweight",
-      "isPreview": false
-    },
-    {
-      "name": "Claude Opus 4.7",
-      "category": "powerful",
       "isPreview": false
     },
     {
@@ -36,16 +31,6 @@
     },
     {
       "name": "Claude Sonnet 5.5",
-      "category": "versatile",
-      "isPreview": false
-    },
-    {
-      "name": "Gemini 3.5 Flash",
-      "category": "lightweight",
-      "isPreview": false
-    },
-    {
-      "name": "Gemini 3.6 Flash",
       "category": "versatile",
       "isPreview": false
     },
@@ -148,7 +133,7 @@
     "Grok 4.7"
   ],
   "sourceKind": "GitHubDocs",
-  "sourceCommit": "476b1e8b5d935ff7d0e8d28c4ca60e9cfb6f7732",
+  "sourceCommit": "096aa77bcc6a140dc766f26f58e1c504028f4378",
   "sourceUrl": "https://docs.github.com/en/copilot/reference/ai-models/supported-models",
   "categorySeeds": [
     {

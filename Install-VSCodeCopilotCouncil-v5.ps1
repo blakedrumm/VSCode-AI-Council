@@ -233,7 +233,7 @@
         August 6th, 2026
 
     Last Modified:
-        October 1st, 2026
+        October 5th, 2026
 
     Version:
         5.20.0
@@ -437,14 +437,11 @@ $UpdateRepository = 'blakedrumm/VSCode-AI-Council'
 # maintainer recommendation review refreshes both together before a push.
 $DefaultModelCatalog = @(
     'Claude Haiku 4.5',
-    'Claude Opus 4.7',
     'Claude Opus 4.8',
     'Claude Opus 5',
     'Claude Opus 5.5',
     'Claude Sonnet 5',
     'Claude Sonnet 5.5',
-    'Gemini 3.5 Flash',
-    'Gemini 3.6 Flash',
     'Gemini 3.7 Flash',
     'Gemini 3.8 Flash',
     'GPT-5 mini',
@@ -467,14 +464,11 @@ $DefaultModelCatalog = @(
 
 $DefaultModelCategoryMap = @{
     'Claude Haiku 4.5' = 'lightweight'
-    'Claude Opus 4.7' = 'powerful'
     'Claude Opus 4.8' = 'powerful'
     'Claude Opus 5' = 'powerful'
     'Claude Opus 5.5' = 'powerful'
     'Claude Sonnet 5' = 'versatile'
     'Claude Sonnet 5.5' = 'versatile'
-    'Gemini 3.5 Flash' = 'lightweight'
-    'Gemini 3.6 Flash' = 'versatile'
     'Gemini 3.7 Flash' = 'versatile'
     'Gemini 3.8 Flash' = 'versatile'
     'GPT-5 mini' = 'lightweight'
@@ -500,7 +494,7 @@ $DefaultModels = @('Claude Opus 5.5', 'GPT-6.1 Sol')
 
 # Shown next to the recommended set so stale rules and fallback metadata are visible rather than
 # silently trusted. Update this only after running the live maintainer recommendation review.
-$RecommendationDate = 'October 1, 2026'
+$RecommendationDate = 'October 5, 2026'
 
 # Position in this list determines each expert's primary lens, so parallel workers never overlap.
 # The Focus entries are pasted verbatim into the generated expert agent, which is what actually
