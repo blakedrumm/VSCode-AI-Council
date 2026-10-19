@@ -111,7 +111,8 @@ function Set-Utf8FileContent
     )
 
     $Utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($LiteralPath, $Content, $Utf8WithoutBom)
+    # API publication bypasses Git's newline conversion, so write LF on every platform.
+    [System.IO.File]::WriteAllText($LiteralPath, $Content.Replace("`r`n", "`n"), $Utf8WithoutBom)
 }
 
 function Get-AssignmentStatement
@@ -641,8 +642,7 @@ if ($Source -eq 'GitHubDocs')
     $Review.categorySeeds = @($PublicCatalog.CategorySeeds)
 }
 
-$NewLine = if ($InstallerText.Contains("`r`n")) { "`r`n" } else { "`n" }
-$ReviewJson = ($Review | ConvertTo-Json -Depth 6) + $NewLine
+$ReviewJson = ($Review | ConvertTo-Json -Depth 6).Replace("`r`n", "`n") + "`n"
 
 $RecommendationDatePattern = '(?m)^\$RecommendationDate\s*=\s*''[^'']*''(?<Ending>\r?)$'
 

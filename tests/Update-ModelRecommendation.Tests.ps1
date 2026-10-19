@@ -215,6 +215,33 @@ Describe 'Recommendation updater file contract' {
         { & $script:UpdaterPath -Path $Root -Source LocalCache -ReviewDate '2030-01-02' | Out-Null } | Should -Not -Throw
     }
 
+    It 'writes LF-only recommendation files from <LineEndingName> inputs' -ForEach @(
+        @{ LineEndingName = 'LF'; LineEnding = "`n" }
+        @{ LineEndingName = 'CRLF'; LineEnding = "`r`n" }
+    ) {
+        $script:FixtureRecords += [PSCustomObject]@{ name = 'Claude Opus 99.1'; category = 'powerful'; isPreview = $false }
+        $Root = New-RecommendationFixture -Records $script:FixtureRecords
+        $Names = @('Install-VSCodeCopilotCouncil-v5.ps1', 'README.md', '.github/model-recommendation-review.json')
+        foreach ($Name in $Names)
+        {
+            $FilePath = Join-Path $Root $Name
+            $Text = [System.IO.File]::ReadAllText($FilePath).Replace("`r`n", "`n").Replace("`n", $LineEnding)
+            [System.IO.File]::WriteAllText($FilePath, $Text, (New-Object System.Text.UTF8Encoding($false)))
+        }
+
+        & $script:UpdaterPath -Path $Root -Source LocalCache -ReviewDate '2030-01-02' -Update | Out-Null
+        foreach ($Name in $Names)
+        {
+            $Text = [System.IO.File]::ReadAllText((Join-Path $Root $Name))
+            $Text.Contains("`r") | Should -BeFalse
+            $Text.Contains("`n") | Should -BeTrue
+        }
+        { & $script:UpdaterPath -Path $Root -Source LocalCache -ReviewDate '2030-01-02' | Out-Null } | Should -Not -Throw
+        $Before = @(Get-RecommendationFixtureHash -Root $Root)
+        & $script:UpdaterPath -Path $Root -ReviewDate '2030-01-03' -Update | Out-Null
+        @(Get-RecommendationFixtureHash -Root $Root) | Should -Be $Before
+    }
+
     It 'keeps unchanged recommendations byte-identical even when checked on a later day' {
         $Root = New-RecommendationFixture -Records $script:FixtureRecords
         & $script:UpdaterPath -Path $Root -Source LocalCache -ReviewDate '2030-01-02' -Update | Out-Null
